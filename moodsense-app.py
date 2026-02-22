@@ -118,7 +118,7 @@ BQ_TABLE_ID = "probable-scout-477715-k7.Moodsense.spotify_dataset_withemotion"
 BQ_QUERY = """
 SELECT
     song,
-    `Artist(s)`                                                         AS artist,
+    `artist_s`                                                         AS artist,
     text                                                                AS lyrics,
     SAFE_CAST(Energy           AS FLOAT64)                              AS Energy,
     SAFE_CAST(Danceability     AS FLOAT64)                              AS Danceability,
@@ -143,7 +143,7 @@ FROM (
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY song, `Artist(s)`
+            PARTITION BY song, `artist_s`
             ORDER BY LENGTH(IFNULL(text, '')) DESC
         ) AS _rn
     FROM `{table}`
