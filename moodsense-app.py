@@ -681,13 +681,26 @@ def generate_playlist(
         st.error(f"Playlist inference error: {exc}")
         return pd.DataFrame(), weights, dominant
 
-    # Filter to ML-predicted top-2 emotions
-    top2       = sorted(weights, key=weights.get, reverse=True)[:2]
-    candidates = pool[pool["_pred_em"].isin(top2)].copy()
-    if len(candidates) < n_songs:
-        candidates = pool[pool["_pred_em"] == dominant].copy()
-    if len(candidates) < n_songs:
-        candidates = pool.copy()
+# Filter to ML-predicted top-2 emotions
+top2 = sorted(weights, key=weights.get, reverse=True)[:2]
+candidates = pool[pool["_pred_em"].isin(top2)].copy()
+
+# Fallback 1: Expand to top-3 emotions if not enough songs
+if len(candidates) < n_songs:
+    top3 = sorted(weights, key=weights.get, reverse=True)[:3]
+    candidates = pool[pool["_pred_em"].isin(top3)].copy()
+
+# Fallback 2: If STILL not enough, use only dominant emotion
+if len(candidates) < n_songs:
+    candidates = pool[pool["_pred_em"] == dominant].copy()
+
+# Fallback 3: Last resort - use dominant + secondary, ranked by confidence
+if len(candidates) < n_songs:
+    top2_expanded = sorted(weights, key=weights.get, reverse=True)[:2]
+    candidates = pool[pool["_pred_em"].isin(top2_expanded)].copy()
+    # Sort by ML confidence to get best matches
+    if "_confidence" in candidates.columns:
+        candidates = candidates.sort_values("_confidence", ascending=False)
 
     # Rank by Euclidean distance to target audio vector
     def audio_dist(row):
