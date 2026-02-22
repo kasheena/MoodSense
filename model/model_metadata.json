@@ -1,0 +1,39 @@
+{
+  "training_date": "2026-02-21 17:24:40",
+  "training_samples": 32000,
+  "test_samples": 8000,
+  "num_features": 25033,
+  "feature_breakdown": {
+    "tfidf": 25000,
+    "vader": 4,
+    "audio": 29
+  },
+  "emotion_classes": [
+    "anger",
+    "happy",
+    "love",
+    "sad"
+  ],
+  "model_performance": {
+    "lightgbm": {
+      "accuracy": 0.649875,
+      "f1_weighted": 0.6480919769443161
+    },
+    "xgboost": {
+      "accuracy": 0.64775,
+      "f1_weighted": 0.6466113503043373
+    },
+    "ensemble": {
+      "accuracy": 0.651875,
+      "f1_weighted": 0.6505193243006215
+    },
+    "linearsvc": {
+      "accuracy": 0.611875,
+      "f1_weighted": 0.6110337932745663
+    },
+    "logreg": {
+      "accuracy": 0.58325,
+      "f1_weighted": 0.5834036701300754
+    }
+  }
+}
