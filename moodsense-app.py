@@ -1,40 +1,38 @@
 """
 MoodSense: Music Emotion Classification Platform
 ─────────────────────────────────────────────────
-MS DSP 422 - Practical Machine Learning | Group 3
+MS DSP 422 – Practical Machine Learning | Group 3
 
-GitHub repo layout expected:
+Repo layout:
     moodsense-app/
-    ├── moodsense_app.py        ← this file
+    ├── moodsense_app.py   ← this file (entry point)
     ├── requirements.txt
-    ├── model/
-    │   ├── audio_scaler.pkl
-    │   ├── vader_scaler.pkl    (optional)
-    │   ├── tfidf.pkl
-    │   ├── label_encoder.pkl
-    │   ├── lightgbm_model.pkl
-    │   ├── xgboost_model.pkl
-    │   ├── ensemble_model.pkl
-    │   ├── linearsvc_model.pkl
-    │   ├── logistic_model.pkl
-    │   └── model_metadata.json
-    └── data/
-        └── spotify_dataset_withemotion.csv   ← place dataset here
+    └── model/
+        ├── audio_scaler.pkl
+        ├── vader_scaler.pkl   (optional)
+        ├── tfidf.pkl
+        ├── label_encoder.pkl
+        ├── lightgbm_model.pkl
+        ├── xgboost_model.pkl
+        ├── ensemble_model.pkl
+        ├── linearsvc_model.pkl
+        ├── logistic_model.pkl
+        └── model_metadata.json
+
+NO dataset file is required or shipped.
+All features run purely from trained model artifacts + user input.
 
 Run locally:
+    pip install -r requirements.txt
     streamlit run moodsense_app.py
-
-Run on Streamlit Cloud:
-    Push repo to GitHub → deploy via share.streamlit.io
-    Upload large dataset via st.file_uploader or host on Google Drive / HuggingFace Hub.
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import pickle
-import os
 import re
 import json
 import warnings
@@ -45,39 +43,35 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 warnings.filterwarnings("ignore")
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-# WEIGHTED ENSEMBLE CLASS
-# Must be defined before ANY pickle.load call so unpickling works correctly.
+# WeightedEnsemble  — MUST live before any pickle.load()
 # ══════════════════════════════════════════════════════════════════════════════
 class WeightedEnsemble:
-    """Weighted soft-voting ensemble of LightGBM, XGBoost, and Logistic Regression."""
+    """Weighted soft-voting ensemble (LightGBM + XGBoost + LogReg)."""
 
     def __init__(self, models: dict, weights: dict, label_encoder):
-        self.models = models
-        self.weights = weights
+        self.models        = models
+        self.weights       = weights
         self.label_encoder = label_encoder
 
     def predict_proba(self, X):
-        probas = []
-        total = sum(self.weights.values())
-        for name, model in self.models.items():
-            w = self.weights[name] / total
-            probas.append(model.predict_proba(X) * w)
+        total  = sum(self.weights.values())
+        probas = [m.predict_proba(X) * (self.weights[n] / total)
+                  for n, m in self.models.items()]
         return np.sum(probas, axis=0)
 
     def predict(self, X):
-        idx = np.argmax(self.predict_proba(X), axis=1)
-        return self.label_encoder.inverse_transform(idx)
+        return self.label_encoder.inverse_transform(
+            np.argmax(self.predict_proba(X), axis=1)
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PATHS — all relative to THIS file's directory (repo root)
+# PATHS — all relative to this file (repo root)
 # ══════════════════════════════════════════════════════════════════════════════
 _ROOT = Path(__file__).parent.resolve()
-
-MODEL_DIR    = _ROOT / "model"
-DATA_DIR     = _ROOT / "data"
-DATASET_PATH = DATA_DIR / "spotify_dataset_withemotion.csv"
+MODEL_DIR = _ROOT / "model"
 
 AUDIO_SCALER_PATH  = MODEL_DIR / "audio_scaler.pkl"
 VADER_SCALER_PATH  = MODEL_DIR / "vader_scaler.pkl"   # optional
@@ -93,10 +87,10 @@ MODEL_FILES = {
     "LogReg":    MODEL_DIR / "logistic_model.pkl",
 }
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
-
 EMOTION_STYLE = {
     "happy": {"color": "#10b981", "emoji": "😊", "desc": "Joyful and uplifting"},
     "sad":   {"color": "#3b82f6", "emoji": "😢", "desc": "Melancholic and reflective"},
@@ -104,15 +98,7 @@ EMOTION_STYLE = {
     "love":  {"color": "#ec4899", "emoji": "💕", "desc": "Romantic and tender"},
 }
 
-# Same label mapping as training pipeline
-EMOTION_4_MAP = {
-    "joy": "happy", "surprise": "happy",
-    "sadness": "sad", "fear": "sad",
-    "anger": "anger", "angry": "anger",
-    "Love": "love",  "love": "love",
-}
-
-# Audio feature columns — must match training order exactly
+# Feature column order MUST match training exactly
 PRIMARY_AUDIO_COLS = [
     "Energy", "Danceability", "Positiveness", "Speechiness",
     "Liveness", "Acousticness", "Instrumentalness", "Tempo",
@@ -123,41 +109,68 @@ API_AUDIO_COLS = [
     "api_instrumentalness", "api_speechiness", "api_liveness",
     "api_tempo", "api_loudness", "api_duration_ms", "api_mode", "api_key",
 ]
-ENGINEERED_COLS = [
-    "feel_good", "electronic", "intensity", "vocal_dom",
-    "mood_energy", "valence_dance", "arousal",
+
+# Valid ranges for each audio feature (lo, hi, default)
+AUDIO_RANGES = {
+    "Energy":           (0.0,  1.0,  0.65),
+    "Danceability":     (0.0,  1.0,  0.60),
+    "Positiveness":     (0.0,  1.0,  0.50),
+    "Speechiness":      (0.0,  1.0,  0.05),
+    "Liveness":         (0.0,  1.0,  0.12),
+    "Acousticness":     (0.0,  1.0,  0.30),
+    "Instrumentalness": (0.0,  1.0,  0.10),
+    "Tempo":            (60,   200,  120),
+    "Loudness":         (-60,  0,    -7),
+    "Popularity":       (0,    100,  50),
+}
+
+# Per-emotion audio centroids (overridden by model_metadata.json if present)
+EMOTION_CENTROIDS_FALLBACK = {
+    "happy": {"Energy":0.75,"Danceability":0.72,"Positiveness":0.78,"Speechiness":0.07,
+              "Liveness":0.17,"Acousticness":0.22,"Instrumentalness":0.04,
+              "Tempo":128,"Loudness":-5,"Popularity":65},
+    "sad":   {"Energy":0.38,"Danceability":0.42,"Positiveness":0.25,"Speechiness":0.04,
+              "Liveness":0.12,"Acousticness":0.60,"Instrumentalness":0.08,
+              "Tempo":98,"Loudness":-10,"Popularity":48},
+    "anger": {"Energy":0.82,"Danceability":0.55,"Positiveness":0.35,"Speechiness":0.12,
+              "Liveness":0.18,"Acousticness":0.15,"Instrumentalness":0.05,
+              "Tempo":145,"Loudness":-4,"Popularity":55},
+    "love":  {"Energy":0.52,"Danceability":0.60,"Positiveness":0.72,"Speechiness":0.05,
+              "Liveness":0.10,"Acousticness":0.40,"Instrumentalness":0.03,
+              "Tempo":108,"Loudness":-7,"Popularity":60},
+}
+
+# Pre-designed playlist presets — each is just a prompt fed to the ML pipeline
+PRESET_PLAYLISTS = [
+    {"id":"work_focus",      "icon":"💼","title":"Deep Work Focus",
+     "subtitle":"Instrumental · low distraction · steady tempo",
+     "prompt":"instrumental focus concentration work study calm steady beats no lyrics","n":20},
+    {"id":"rainy_afternoon", "icon":"🌧️","title":"Rainy Afternoon",
+     "subtitle":"Melancholic · acoustic · introspective",
+     "prompt":"rain melancholic quiet acoustic reflective slow afternoon sad gentle","n":18},
+    {"id":"heartbreak",      "icon":"💔","title":"Heartbreak Hotel",
+     "subtitle":"Emotional · raw · post-breakup vibes",
+     "prompt":"heartbreak crying pain love lost breakup emotional tears missing someone","n":18},
+    {"id":"late_night_drive","icon":"🚗","title":"Late Night Drive",
+     "subtitle":"Dark · atmospheric · driving energy",
+     "prompt":"night dark driving highway electric atmospheric moody intensity beat","n":20},
+    {"id":"summer_party",    "icon":"🌞","title":"Summer Party",
+     "subtitle":"High energy · danceable · joyful",
+     "prompt":"party dance happy upbeat energy summer fun celebration joyful loud","n":20},
+    {"id":"romance",         "icon":"🌹","title":"Date Night",
+     "subtitle":"Romantic · tender · warm",
+     "prompt":"love romance tender sweet gentle warmth affection intimate caring","n":18},
+    {"id":"anger_release",   "icon":"⚡","title":"Rage Release",
+     "subtitle":"Intense · powerful · cathartic",
+     "prompt":"anger intense powerful aggressive rage frustration electric loud cathartic","n":18},
+    {"id":"morning_run",     "icon":"🏃","title":"Morning Run",
+     "subtitle":"Energetic · motivating · fast tempo",
+     "prompt":"run exercise morning energetic motivating fast beats workout pump adrenaline","n":20},
 ]
 
-# Pre-designed playlist presets (prompts fed to the ML pipeline — no special logic)
-PRESET_PLAYLISTS = [
-    {"id": "work_focus",      "icon": "💼", "title": "Deep Work Focus",
-     "subtitle": "Instrumental · low distraction · steady tempo",
-     "prompt": "instrumental focus concentration work study calm steady beats no lyrics", "n": 20},
-    {"id": "rainy_afternoon", "icon": "🌧️", "title": "Rainy Afternoon",
-     "subtitle": "Melancholic · acoustic · introspective",
-     "prompt": "rain melancholic quiet acoustic reflective slow afternoon sad gentle", "n": 18},
-    {"id": "heartbreak",      "icon": "💔", "title": "Heartbreak Hotel",
-     "subtitle": "Emotional · raw · post-breakup vibes",
-     "prompt": "heartbreak crying pain love lost breakup emotional tears missing someone", "n": 18},
-    {"id": "late_night_drive","icon": "🚗", "title": "Late Night Drive",
-     "subtitle": "Dark · atmospheric · driving energy",
-     "prompt": "night dark driving highway electric atmospheric moody intensity beat", "n": 20},
-    {"id": "summer_party",    "icon": "🌞", "title": "Summer Party",
-     "subtitle": "High energy · danceable · joyful",
-     "prompt": "party dance happy upbeat energy summer fun celebration joyful loud", "n": 20},
-    {"id": "romance",         "icon": "🌹", "title": "Date Night",
-     "subtitle": "Romantic · tender · warm",
-     "prompt": "love romance tender sweet gentle warmth affection intimate caring", "n": 18},
-    {"id": "anger_release",   "icon": "⚡", "title": "Rage Release",
-     "subtitle": "Intense · powerful · cathartic",
-     "prompt": "anger intense powerful aggressive rage frustration electric loud cathartic", "n": 18},
-    {"id": "morning_run",     "icon": "🏃", "title": "Morning Run",
-     "subtitle": "Energetic · motivating · fast tempo",
-     "prompt": "run exercise morning energetic motivating fast beats workout pump adrenaline", "n": 20},
-]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE CONFIG  (must be first Streamlit call)
+# PAGE CONFIG  (first Streamlit call)
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="MoodSense | Music Emotion Analytics",
@@ -165,6 +178,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS
@@ -177,180 +191,126 @@ st.markdown("""
 h1, h2, h3 { font-family: 'Syne', sans-serif !important; }
 
 :root {
-    --ink:    #0f172a;
-    --muted:  #64748b;
-    --border: #e2e8f0;
-    --bg:     #f8fafc;
-    --card:   #ffffff;
-    --blue:   #1d4ed8;
-    --blue-lt:#3b82f6;
+    --ink:#0f172a; --muted:#64748b; --border:#e2e8f0;
+    --bg:#f8fafc;  --card:#ffffff;
+    --blue:#1d4ed8; --blue-lt:#3b82f6;
 }
+.main { background:var(--bg); }
 
-.main { background: var(--bg); }
-
-/* ── Hero banner ── */
 .hero {
-    background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 60%, #3b82f6 100%);
-    padding: 3.5rem 2.5rem; border-radius: 20px; color: white;
-    text-align: center; margin-bottom: 2rem;
-    box-shadow: 0 24px 64px rgba(29,78,216,.25);
-    position: relative; overflow: hidden;
+    background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 60%,#3b82f6 100%);
+    padding:3.5rem 2.5rem; border-radius:20px; color:white;
+    text-align:center; margin-bottom:2rem;
+    box-shadow:0 24px 64px rgba(29,78,216,.25);
+    position:relative; overflow:hidden;
 }
 .hero::before {
-    content: ''; position: absolute; inset: 0;
-    background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.04'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    content:''; position:absolute; inset:0;
+    background:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.04'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
 }
-.hero-title { font-size: 3.5rem; font-weight: 800; margin: 0 0 1rem; letter-spacing: -0.03em; }
-.hero-sub   { font-size: 1.2rem; opacity: .85; margin: 0; }
+.hero-title { font-size:3.5rem; font-weight:800; margin:0 0 1rem; letter-spacing:-.03em; }
+.hero-sub   { font-size:1.2rem; opacity:.85; margin:0; }
 
-/* ── KPI cards ── */
 .kpi {
-    background: var(--card); padding: 1.5rem; border-radius: 14px;
-    border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.04);
+    background:var(--card); padding:1.5rem; border-radius:14px;
+    border:1px solid var(--border); box-shadow:0 2px 8px rgba(0,0,0,.04);
 }
-.kpi-val { font-size: 2.2rem; font-weight: 800; color: var(--blue);
-           margin: 0; font-family: 'Syne', sans-serif; }
-.kpi-lbl { font-size: .75rem; color: var(--muted); text-transform: uppercase;
-           letter-spacing: .08em; font-weight: 600; margin-top: .4rem; }
+.kpi-val { font-size:2.2rem; font-weight:800; color:var(--blue); margin:0; font-family:'Syne',sans-serif; }
+.kpi-lbl { font-size:.75rem; color:var(--muted); text-transform:uppercase;
+           letter-spacing:.08em; font-weight:600; margin-top:.4rem; }
 
-/* ── Emotion result card ── */
-.emo-card  { padding: 2.5rem; border-radius: 18px; text-align: center;
-             box-shadow: 0 12px 40px rgba(0,0,0,.18); margin: 1.5rem 0; }
-.emo-emoji { font-size: 5rem; }
-.emo-name  { font-size: 2.2rem; font-weight: 800; margin: .8rem 0 .4rem;
-             font-family: 'Syne', sans-serif; }
-.emo-desc  { font-size: 1rem; opacity: .85; }
+.emo-card  { padding:2.5rem; border-radius:18px; text-align:center;
+             box-shadow:0 12px 40px rgba(0,0,0,.18); margin:1.5rem 0; }
+.emo-emoji { font-size:5rem; }
+.emo-name  { font-size:2.2rem; font-weight:800; margin:.8rem 0 .4rem; font-family:'Syne',sans-serif; }
+.emo-desc  { font-size:1rem; opacity:.85; }
 
-/* ── Sidebar ── */
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a, #1e293b); }
-[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-
-/* ── Buttons ── */
-.stButton button {
-    background: linear-gradient(135deg, var(--blue), var(--blue-lt));
-    color: white; border: none; border-radius: 10px;
-    padding: .75rem 2rem; font-weight: 600; letter-spacing: .02em;
-    transition: all .25s;
+.atlas-card {
+    background:var(--card); border-radius:16px; padding:1.5rem;
+    border:1px solid var(--border); box-shadow:0 4px 16px rgba(0,0,0,.06);
+    margin-bottom:1rem;
 }
-.stButton button:hover {
-    box-shadow: 0 8px 24px rgba(29,78,216,.35);
-    transform: translateY(-2px);
-}
+.atlas-title { font-family:'Syne',sans-serif; font-size:1.1rem; font-weight:800; margin:0 0 .3rem; }
+.atlas-sub   { font-size:.82rem; color:var(--muted); margin-bottom:.8rem; }
 
-/* ── Playlist tab ── */
+.batch-row {
+    display:flex; align-items:center; gap:1rem; padding:.65rem .5rem;
+    border-radius:8px; border-bottom:1px solid var(--border); transition:background .15s;
+}
+.batch-row:hover { background:var(--bg); }
+.batch-num  { width:1.8rem; text-align:right; color:var(--muted); font-size:.85rem; font-weight:600; flex-shrink:0; }
+.batch-info { flex:1; min-width:0; }
+.batch-name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.batch-artist { font-size:.8rem; color:var(--muted); }
+.badge { font-size:.72rem; font-weight:700; padding:.2rem .65rem; border-radius:999px; flex-shrink:0; }
+.conf-wrap { width:80px; flex-shrink:0; }
+.conf-bg   { background:#e2e8f0; border-radius:4px; height:6px; }
+.conf-fg   { border-radius:4px; height:6px; }
+
 .playlist-card {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 16px; padding: 1.75rem;
-    box-shadow: 0 4px 16px rgba(0,0,0,.06); margin-bottom: 1rem;
+    background:var(--card); border:1px solid var(--border);
+    border-radius:16px; padding:1.75rem;
+    box-shadow:0 4px 16px rgba(0,0,0,.06); margin-bottom:1rem;
 }
-.playlist-header {
-    font-family: 'Syne', sans-serif; font-size: 1.6rem;
-    font-weight: 800; margin: 0 0 .3rem;
-}
-.playlist-meta { color: var(--muted); font-size: .85rem; margin-bottom: 1rem; }
-
+.playlist-header { font-family:'Syne',sans-serif; font-size:1.6rem; font-weight:800; margin:0 0 .3rem; }
+.playlist-meta   { color:var(--muted); font-size:.85rem; margin-bottom:1rem; }
 .track-row {
-    display: flex; align-items: center; gap: 1rem;
-    padding: .65rem .5rem; border-radius: 8px;
-    border-bottom: 1px solid var(--border); transition: background .15s;
+    display:flex; align-items:center; gap:1rem; padding:.65rem .5rem;
+    border-radius:8px; border-bottom:1px solid var(--border); transition:background .15s;
 }
-.track-row:hover { background: var(--bg); }
-.track-num   { width: 1.8rem; text-align: right; color: var(--muted);
-               font-size: .85rem; font-weight: 600; flex-shrink: 0; }
-.track-info  { flex: 1; min-width: 0; }
-.track-name  { font-weight: 600; white-space: nowrap;
-               overflow: hidden; text-overflow: ellipsis; }
-.track-artist{ font-size: .8rem; color: var(--muted); }
-.track-badge { font-size: .72rem; font-weight: 700; padding: .2rem .65rem;
-               border-radius: 999px; flex-shrink: 0; }
-.conf-bar-wrap{ width: 80px; flex-shrink: 0; }
-.conf-bar-bg  { background: #e2e8f0; border-radius: 4px; height: 6px; }
-.conf-bar-fg  { border-radius: 4px; height: 6px; }
+.track-row:hover  { background:var(--bg); }
+.track-num   { width:1.8rem; text-align:right; color:var(--muted); font-size:.85rem; font-weight:600; flex-shrink:0; }
+.track-info  { flex:1; min-width:0; }
+.track-name  { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.track-artist{ font-size:.8rem; color:var(--muted); }
 
-#MainMenu, footer { visibility: hidden; }
+[data-testid="stSidebar"] { background:linear-gradient(180deg,#0f172a,#1e293b); }
+[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
+
+.stButton button {
+    background:linear-gradient(135deg,var(--blue),var(--blue-lt));
+    color:white; border:none; border-radius:10px;
+    padding:.75rem 2rem; font-weight:600; letter-spacing:.02em; transition:all .25s;
+}
+.stButton button:hover { box-shadow:0 8px 24px rgba(29,78,216,.35); transform:translateY(-2px); }
+
+#MainMenu, footer { visibility:hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LOADERS  (cached so they run once per session)
+# MODEL LOADING
 # ══════════════════════════════════════════════════════════════════════════════
-
 @st.cache_resource(show_spinner="Loading ML models…")
 def load_models() -> dict | None:
-    """Load all pkl artifacts from model/ directory. Returns bundle dict or None."""
+    """Load all pkl artifacts from model/. Returns bundle dict or None."""
     bundle: dict = {}
 
-    def _load(path: Path):
-        with open(path, "rb") as f:
+    def _load(p: Path):
+        with open(p, "rb") as f:
             return pickle.load(f)
 
-    missing = []
-    for required in [AUDIO_SCALER_PATH, TFIDF_PATH, LABEL_ENCODER_PATH]:
-        if not required.exists():
-            missing.append(str(required))
-
+    missing = [str(p) for p in [AUDIO_SCALER_PATH, TFIDF_PATH, LABEL_ENCODER_PATH]
+               if not p.exists()]
     if missing:
-        st.error(
-            f"❌ Required model files not found:\n" + "\n".join(f"  • {m}" for m in missing)
-            + "\n\nEnsure `model/` directory contains all pkl files."
-        )
+        st.error("❌ Required model files missing:\n" +
+                 "\n".join(f"  • {m}" for m in missing))
         return None
 
     try:
         bundle["audio_scaler"]  = _load(AUDIO_SCALER_PATH)
         bundle["tfidf"]         = _load(TFIDF_PATH)
         bundle["label_encoder"] = _load(LABEL_ENCODER_PATH)
-
         if VADER_SCALER_PATH.exists():
             bundle["vader_scaler"] = _load(VADER_SCALER_PATH)
-
         for name, path in MODEL_FILES.items():
             if path.exists():
                 bundle[name] = _load(path)
-
-        loaded_models = [n for n in MODEL_FILES if n in bundle]
-        if not loaded_models:
-            st.warning("⚠️ No classifier models found in model/ — only preprocessors loaded.")
-
         return bundle
-
     except Exception as exc:
         st.error(f"❌ Model loading failed: {exc}")
         return None
-
-
-@st.cache_data(show_spinner="Loading dataset…")
-def load_dataset() -> pd.DataFrame | None:
-    """
-    Load the emotion dataset from data/spotify_dataset_withemotion.csv.
-    Derives emotion_4 column using the same mapping as training if absent.
-    Supports uploading via the sidebar when the file is not on disk.
-    """
-    if not DATASET_PATH.exists():
-        return None
-
-    df = pd.read_csv(DATASET_PATH)
-
-    # Derive emotion_4 if column absent (raw dataset ships with 'emotion')
-    if "emotion_4" not in df.columns:
-        if "emotion" not in df.columns:
-            st.error("❌ Dataset has neither 'emotion' nor 'emotion_4' column.")
-            return None
-        df["emotion"] = df["emotion"].replace({"Love": "love", "angry": "anger"})
-        df["emotion_4"] = df["emotion"].map(EMOTION_4_MAP)
-
-    valid = list(EMOTION_STYLE.keys())
-    df = df[df["emotion_4"].isin(valid)].copy()
-
-    if "Artist(s)" in df.columns and "song" in df.columns:
-        df = df.drop_duplicates(subset=["Artist(s)", "song"], keep="first")
-
-    for col in PRIMARY_AUDIO_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df.reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False)
@@ -362,423 +322,292 @@ def load_metadata() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FEATURE ENGINEERING  (mirrors training pipeline exactly)
+# FEATURE PIPELINE — mirrors training exactly, no dataset needed
 # ══════════════════════════════════════════════════════════════════════════════
-
-def clean_lyrics(text: str) -> str:
-    """Pre-process lyrics text — identical to training step."""
+def clean_text(text: str) -> str:
     text = str(text).lower()
-    text = re.sub(r"\[.*?\]", " ", text)                           # remove [Chorus] etc.
-    text = re.sub(r"\b(la|na|oh|ah|uh|yeah|ooh|mm|hey)\b", " ", text)  # ad-libs
+    text = re.sub(r"\[.*?\]", " ", text)
+    text = re.sub(r"\b(la|na|oh|ah|uh|yeah|ooh|mm|hey)\b", " ", text)
     text = re.sub(r"[^a-z\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def build_feature_vector(song_vals: dict, lyrics: str, bundle: dict):
+def audio_vals_to_vector(vals: dict) -> list:
     """
-    Construct the exact feature matrix the trained models expect.
-
-    Column layout (25 033 total):
-        TF-IDF   : 25 000
-        VADER    :      4
-        Audio    :     29  (10 primary + 12 API zeros + 7 engineered)
+    Convert audio feature dict → 29-d vector matching training column order:
+        10 primary + 12 API (zeros at inference) + 7 engineered
     """
-    tfidf = bundle.get("tfidf")
-
-    # 1. TF-IDF
-    if tfidf and lyrics.strip():
-        X_tfidf = tfidf.transform([clean_lyrics(lyrics)])
-    else:
-        n = tfidf.get_feature_names_out().shape[0] if tfidf else 25_000
-        X_tfidf = csr_matrix((1, n))
-
-    # 2. VADER sentiment
-    vader_obj = SentimentIntensityAnalyzer()
-    vs = vader_obj.polarity_scores(clean_lyrics(lyrics) if lyrics.strip() else "")
-    vader_raw = np.array([[vs["neg"], vs["neu"], vs["pos"], vs["compound"]]])
-    if "vader_scaler" in bundle:
-        vader_feat = bundle["vader_scaler"].transform(vader_raw).astype("float32")
-    else:
-        vader_feat = vader_raw.astype("float32")
-
-    # 3. Primary audio
-    def sv(k, default=0.0):
-        return float(song_vals.get(k, default))
+    def sv(k, d=0.0): return float(vals.get(k, d))
 
     energy   = sv("Energy",           0.5)
     dance    = sv("Danceability",      0.5)
     pos      = sv("Positiveness",      0.5)
-    acoustic = sv("Acousticness",      0.5)
-    tempo    = sv("Tempo",           120.0)
-    speech   = sv("Speechiness",      0.05)
-    instr    = sv("Instrumentalness",  0.1)
-    loudness = sv("Loudness",         -7.0)
+    speech   = sv("Speechiness",       0.05)
     liveness = sv("Liveness",          0.1)
+    acoustic = sv("Acousticness",      0.5)
+    instr    = sv("Instrumentalness",  0.1)
+    tempo    = sv("Tempo",           120.0)
+    loudness = sv("Loudness",         -7.0)
     pop      = sv("Popularity",       50.0)
 
     primary    = [energy, dance, pos, speech, liveness, acoustic, instr, tempo, loudness, pop]
-    api_zeros  = [0.0] * len(API_AUDIO_COLS)          # API features not available at inference
+    api_zeros  = [0.0] * len(API_AUDIO_COLS)
     engineered = [
         dance * pos / 100,       # feel_good
         energy - acoustic,       # electronic
         tempo * energy / 100,    # intensity
         speech / (instr + 1),    # vocal_dom
         pos / (energy + 1),      # mood_energy
-        0.0,                     # valence_dance  (api_valence unavailable)
-        0.0,                     # arousal        (api_energy  unavailable)
+        0.0,                     # valence_dance (API unavailable)
+        0.0,                     # arousal       (API unavailable)
     ]
+    return primary + api_zeros + engineered
 
-    audio_vec = np.array([primary + api_zeros + engineered], dtype="float32")
 
-    # 4. Scale audio
-    scaler = bundle.get("audio_scaler")
+def build_feature_matrix(audio_rows: list, lyrics_list: list, bundle: dict):
+    """
+    Build the sparse feature matrix expected by trained models.
+    Shape: (n, 25033)  — TF-IDF(25000) + VADER(4) + Audio(29)
+    No dataset access — only user-supplied values.
+    """
+    n       = len(audio_rows)
+    tfidf   = bundle.get("tfidf")
+    n_tfidf = tfidf.get_feature_names_out().shape[0] if tfidf else 25_000
+
+    # TF-IDF
+    if tfidf:
+        cleaned = [clean_text(lyr) if str(lyr).strip() else "" for lyr in lyrics_list]
+        X_tfidf = tfidf.transform(cleaned)
+    else:
+        X_tfidf = csr_matrix((n, n_tfidf))
+
+    # VADER
+    vader_obj = SentimentIntensityAnalyzer()
+    vader_mat = np.zeros((n, 4), dtype="float32")
+    for i, lyr in enumerate(lyrics_list):
+        if str(lyr).strip():
+            vs = vader_obj.polarity_scores(clean_text(lyr))
+            vader_mat[i] = [vs["neg"], vs["neu"], vs["pos"], vs["compound"]]
+    if "vader_scaler" in bundle:
+        try:
+            vader_mat = bundle["vader_scaler"].transform(vader_mat).astype("float32")
+        except Exception:
+            pass
+
+    # Audio
+    audio_mat = np.array([audio_vals_to_vector(r) for r in audio_rows], dtype="float32")
+    scaler    = bundle.get("audio_scaler")
     if scaler:
         try:
-            audio_vec = scaler.transform(audio_vec)
+            audio_mat = scaler.transform(audio_mat)
         except Exception:
-            pass  # dimension mismatch fallback — pass raw
+            pass
 
-    return hstack([X_tfidf, csr_matrix(vader_feat), csr_matrix(audio_vec)])
+    return hstack([X_tfidf, csr_matrix(vader_mat), csr_matrix(audio_mat)])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PREDICTION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def predict(X, bundle: dict, model_name: str) -> dict | None:
+def run_inference(X, bundle: dict, model_name: str):
     """
-    Run inference. Handles both predict_proba models (LightGBM, XGBoost, Ensemble, LogReg)
-    and decision-function-only models (LinearSVC).
-    Returns: {prediction, confidence, probabilities}
+    Run model inference.
+    Returns (predicted_string_labels: np.ndarray, proba_matrix: np.ndarray)
     """
     model = bundle.get(model_name)
     le    = bundle.get("label_encoder")
     if model is None:
-        return None
+        raise ValueError(f"Model '{model_name}' not in bundle.")
 
-    try:
-        if hasattr(model, "predict_proba"):
-            proba   = model.predict_proba(X)[0]
-            classes = le.classes_ if le is not None else list(EMOTION_STYLE.keys())
-            emotion_probs = dict(zip(classes, proba))
-            pred_idx      = int(np.argmax(proba))
-            prediction    = classes[pred_idx]
+    if hasattr(model, "predict_proba"):
+        proba    = model.predict_proba(X)
+        pred_idx = np.argmax(proba, axis=1)
+        classes  = le.classes_ if le is not None else list(EMOTION_STYLE.keys())
+        # Decode: le.classes_ may be strings or ints
+        if le is not None:
+            labels = np.array([str(le.inverse_transform([i])[0]) for i in pred_idx])
         else:
-            # LinearSVC — no probability output
-            raw        = model.predict(X)[0]
-            prediction = str(raw)
-            emotion_probs = {e: (1.0 if e == prediction else 0.0) for e in EMOTION_STYLE}
-            proba      = np.array(list(emotion_probs.values()))
+            labels = np.array([str(classes[i]) for i in pred_idx])
+    else:
+        # LinearSVC — no predict_proba
+        raw    = model.predict(X)
+        labels = np.array([str(r) for r in raw])
+        cls    = list(EMOTION_STYLE.keys())
+        proba  = np.zeros((len(labels), len(cls)), dtype="float32")
+        for i, lbl in enumerate(labels):
+            if lbl in cls:
+                proba[i, cls.index(lbl)] = 1.0
 
-        # Decode integer label if needed
-        if isinstance(prediction, (int, np.integer)) and le is not None:
-            prediction = le.inverse_transform([prediction])[0]
-
-        return {
-            "prediction":    str(prediction),
-            "confidence":    float(np.max(proba)),
-            "probabilities": {str(k): float(v) for k, v in emotion_probs.items()},
-        }
-
-    except Exception as exc:
-        st.error(f"Prediction error ({model_name}): {exc}")
-        return None
+    return labels, proba
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIMILAR SONGS  (audio cosine distance within predicted emotion)
+# PLAYLIST ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
-
-def similar_songs(song_vals: dict, df: pd.DataFrame, emotion: str, n: int = 10) -> pd.DataFrame:
-    sub       = df[df["emotion_4"] == emotion].copy()
-    feat_cols = [c for c in ["Energy", "Positiveness", "Danceability", "Acousticness", "Tempo"]
-                 if c in sub.columns]
-    if sub.empty or not feat_cols:
-        return pd.DataFrame()
-
-    def dist(row):
-        d = 0.0
-        for c in feat_cols:
-            v1 = 0.0 if pd.isna(row.get(c)) else float(row[c])
-            v2 = float(song_vals.get(c, 0.5))
-            if c == "Tempo":
-                v1 /= 200; v2 /= 200
-            d += (v1 - v2) ** 2
-        return d ** 0.5
-
-    sub["_dist"] = sub.apply(dist, axis=1)
-    return (sub[sub["_dist"] > 0.01]
-            .nsmallest(n, "_dist")
-            [["song", "Artist(s)", "emotion_4", "Energy", "Positiveness", "_dist"]])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PLAYLIST ENGINE — Pure ML + NLP
-# ══════════════════════════════════════════════════════════════════════════════
-
-def parse_prompt_to_signals(prompt_text: str, bundle: dict) -> dict:
+def parse_prompt_to_weights(prompt: str, bundle: dict) -> dict:
     """
-    Converts a free-text mood prompt into soft emotion weights.
-
-    Method:
-      • VADER polarity scores → continuous 4-d emotion signal (no thresholds)
-      • TF-IDF cosine similarity between prompt vector and 4 emotion reference
-        documents in the trained vocabulary space
-      • 50/50 blend → normalised emotion weight dict
+    NLP: free-text → soft emotion weight dict via
+         VADER sentiment + TF-IDF cosine similarity.
+    Purely continuous — no threshold rules.
     """
     vader_obj = SentimentIntensityAnalyzer()
-    vs        = vader_obj.polarity_scores(prompt_text)
-    compound  = vs["compound"]
-    neg, pos  = vs["neg"], vs["pos"]
+    vs        = vader_obj.polarity_scores(prompt)
+    compound, neg, pos = vs["compound"], vs["neg"], vs["pos"]
 
-    # Continuous VADER signal — no if/else thresholds
-    vader_signal = {
+    vader_sig = {
         "happy": pos * (1 + compound) / 2,
         "love":  pos * max(0.0, 1 - neg),
         "sad":   neg * (2 - compound) / 2,
         "anger": neg * (1 + abs(compound)),
     }
 
-    # TF-IDF cosine similarity to emotion reference documents
     EMOTION_DOCS = {
         "happy": "joy dance smile laugh celebrate fun sunshine bright energy cheerful upbeat",
         "sad":   "cry tears sorrow grief lonely pain heartbreak quiet dark rain melancholy",
         "anger": "rage fury fight anger aggressive loud power electric intense frustration scream",
         "love":  "love tender romance sweet kiss warmth affection gentle care heart beloved",
     }
-    tfidf_signal = {e: 0.0 for e in EMOTION_STYLE}
-    tfidf = bundle.get("tfidf")
+    tfidf_sig = {e: 0.0 for e in EMOTION_STYLE}
+    tfidf     = bundle.get("tfidf")
     if tfidf:
         try:
-            p_vec = tfidf.transform([clean_lyrics(prompt_text)])
+            p_vec = tfidf.transform([clean_text(prompt)])
             for em, doc in EMOTION_DOCS.items():
-                d_vec = tfidf.transform([clean_lyrics(doc)])
-                tfidf_signal[em] = float(cosine_similarity(p_vec, d_vec)[0][0])
+                d_vec = tfidf.transform([clean_text(doc)])
+                tfidf_sig[em] = float(cosine_similarity(p_vec, d_vec)[0][0])
         except Exception:
             pass
 
-    raw   = {em: 0.5 * vader_signal.get(em, 0.0) + 0.5 * tfidf_signal[em]
-             for em in EMOTION_STYLE}
+    raw   = {em: 0.5 * vader_sig.get(em, 0.0) + 0.5 * tfidf_sig[em] for em in EMOTION_STYLE}
     total = sum(raw.values()) or 1.0
     return {em: v / total for em, v in raw.items()}
 
 
-@st.cache_data(show_spinner=False)
-def get_audio_centroids(_df: pd.DataFrame) -> dict:
-    """Mean audio feature vector per emotion from the actual dataset (cached)."""
-    audio_cols = [c for c in PRIMARY_AUDIO_COLS if c in _df.columns]
-    return {
-        em: _df[_df["emotion_4"] == em][audio_cols].mean().to_dict()
-        for em in EMOTION_STYLE
+def get_centroids(metadata: dict) -> dict:
+    return metadata.get("emotion_audio_centroids") or EMOTION_CENTROIDS_FALLBACK
+
+
+def generate_playlist(prompt: str, bundle: dict, model_key: str,
+                      metadata: dict, n_songs: int = 20):
+    """
+    Dataset-free playlist pipeline:
+      1. NLP → emotion weights
+      2. Weighted audio centroid → target audio profile
+      3. Generate ~800 synthetic candidates via Gaussian noise around centroid
+      4. ML classify all candidates
+      5. Filter to dominant emotion(s), rank by confidence → return top-n
+    """
+    weights    = parse_prompt_to_weights(prompt, bundle)
+    dominant   = max(weights, key=weights.get)
+    centroids  = get_centroids(metadata)
+
+    # Target audio = weighted blend of per-emotion centroids
+    target = {
+        col: sum(weights[em] * centroids.get(em, {}).get(col, AUDIO_RANGES[col][2])
+                 for em in weights)
+        for col in PRIMARY_AUDIO_COLS
     }
 
+    # Generate synthetic candidate pool
+    n_pool = max(800, n_songs * 40)
+    rng    = np.random.default_rng(42)
+    pool   = []
+    for _ in range(n_pool):
+        song = {}
+        for col, (lo, hi, _) in AUDIO_RANGES.items():
+            center = target.get(col, (lo + hi) / 2)
+            val    = center + rng.normal(0, 0.15 * (hi - lo))
+            song[col] = float(np.clip(val, lo, hi))
+        pool.append(song)
 
-def generate_playlist(
-    prompt_text: str,
-    df: pd.DataFrame,
-    bundle: dict,
-    model_key: str,
-    n_songs: int = 20,
-    centroids: dict | None = None,
-) -> tuple[pd.DataFrame, dict, str]:
-    """
-    Playlist generation pipeline — strictly ML/NLP.
+    # ML inference on pool
+    try:
+        X_pool            = build_feature_matrix(pool, [""] * n_pool, bundle)
+        pred_labels, proba = run_inference(X_pool, bundle, model_key)
+    except Exception as exc:
+        st.error(f"Playlist inference error: {exc}")
+        return pd.DataFrame(), weights, dominant
 
-    Steps:
-      1. NLP → soft emotion weights (parse_prompt_to_signals)
-      2. Weighted centroid of per-emotion audio profiles → target audio vector
-      3. Sample pool of 5 000 songs, run the trained ML model to predict emotion
-         for each (not using BERT ground-truth labels)
-      4. Filter to songs predicted in top-2 emotions by weight
-      5. Rank by Euclidean distance to target audio vector → return top-n
-    """
-    if df is None or df.empty or bundle is None:
-        return pd.DataFrame(), {}, "happy"
+    le      = bundle.get("label_encoder")
+    classes = list(le.classes_) if le is not None else list(EMOTION_STYLE.keys())
 
-    emotion_weights = parse_prompt_to_signals(prompt_text, bundle)
-    dominant_em     = max(emotion_weights, key=emotion_weights.get)
+    pool_df = pd.DataFrame(pool)
+    pool_df["_pred_em"]    = pred_labels
+    pool_df["_confidence"] = proba.max(axis=1)
+    for i, em in enumerate(classes):
+        pool_df[f"_conf_{em}"] = proba[:, i]
 
-    if centroids is None:
-        centroids = get_audio_centroids(df)
+    # Filter to top-2 emotion classes
+    top2       = sorted(weights, key=weights.get, reverse=True)[:2]
+    candidates = pool_df[pool_df["_pred_em"].isin(top2)].copy()
+    if len(candidates) < n_songs:
+        candidates = pool_df[pool_df["_pred_em"] == dominant].copy()
+    if len(candidates) < n_songs:
+        candidates = pool_df.copy()
 
-    audio_cols   = [c for c in PRIMARY_AUDIO_COLS if c in df.columns]
-    target_audio = {
-        col: sum(emotion_weights[em] * centroids.get(em, {}).get(col, 0.5)
-                 for em in emotion_weights)
-        for col in audio_cols
-    }
-
-    pool = df.sample(n=min(5_000, len(df)), random_state=42).copy()
-
-    le    = bundle.get("label_encoder")
-    model = bundle.get(model_key)
-
-    predicted_emotions = None
-    if model is not None and hasattr(model, "predict_proba"):
-        try:
-            tfidf_obj = bundle.get("tfidf")
-            n_tfidf   = tfidf_obj.get_feature_names_out().shape[0] if tfidf_obj else 25_000
-
-            rows = []
-            for _, row in pool.iterrows():
-                sv  = {c: (float(row[c]) if pd.notna(row.get(c)) else 0.0)
-                        for c in PRIMARY_AUDIO_COLS if c in pool.columns}
-                e_  = sv.get("Energy",          0.5)
-                d_  = sv.get("Danceability",     0.5)
-                p_  = sv.get("Positiveness",     0.5)
-                a_  = sv.get("Acousticness",     0.5)
-                t_  = sv.get("Tempo",          120.0)
-                sp_ = sv.get("Speechiness",     0.05)
-                i_  = sv.get("Instrumentalness", 0.1)
-                primary_v = [sv.get(c, 0.0) for c in PRIMARY_AUDIO_COLS]
-                api_v     = [0.0] * len(API_AUDIO_COLS)
-                eng_v     = [d_*p_/100, e_-a_, t_*e_/100, sp_/(i_+1), p_/(e_+1), 0.0, 0.0]
-                rows.append(primary_v + api_v + eng_v)
-
-            audio_mat = np.array(rows, dtype="float32")
-            scaler    = bundle.get("audio_scaler")
-            if scaler:
-                try:
-                    audio_mat = scaler.transform(audio_mat)
-                except Exception:
-                    pass
-
-            X_pool = hstack([
-                csr_matrix((len(pool), n_tfidf)),
-                csr_matrix(np.zeros((len(pool), 4), dtype="float32")),
-                csr_matrix(audio_mat),
-            ])
-
-            proba_all  = model.predict_proba(X_pool)
-            pred_idx   = np.argmax(proba_all, axis=1)
-            classes    = le.classes_ if le is not None else list(EMOTION_STYLE.keys())
-            predicted_emotions = (le.inverse_transform(pred_idx) if le is not None
-                                  else np.array(classes)[pred_idx])
-
-            pool["_pred_em"] = predicted_emotions
-            for i, em in enumerate(classes):
-                pool[f"_conf_{em}"] = proba_all[:, i]
-
-        except Exception:
-            predicted_emotions = None
-
-    top2 = sorted(emotion_weights, key=emotion_weights.get, reverse=True)[:2]
-
-    if predicted_emotions is not None and "_pred_em" in pool.columns:
-        candidates = pool[pool["_pred_em"].isin(top2)].copy()
-        if len(candidates) < n_songs:
-            candidates = pool[pool["_pred_em"] == dominant_em].copy()
-        if len(candidates) < n_songs:
-            candidates = pool.copy()
-    else:
-        # Fallback: filter by BERT label when model not available
-        candidates = pool[pool["emotion_4"].isin(top2)].copy()
-
-    def audio_dist(row):
-        d = 0.0
-        for col in audio_cols:
-            if col in row.index:
-                v   = float(row[col]) if pd.notna(row.get(col)) else 0.0
-                tgt = target_audio.get(col, 0.5)
-                if col == "Tempo":
-                    v /= 200; tgt /= 200
-                elif col == "Loudness":
-                    v = (v + 60) / 60; tgt = (tgt + 60) / 60
-                d += (v - tgt) ** 2
-        return d ** 0.5
-
-    candidates["_audio_dist"] = candidates.apply(audio_dist, axis=1)
-    return candidates.nsmallest(n_songs, "_audio_dist").copy(), emotion_weights, dominant_em
+    # Rank by model confidence in dominant emotion
+    conf_col = f"_conf_{dominant}"
+    rank_col = conf_col if conf_col in candidates.columns else "_confidence"
+    playlist = candidates.nlargest(n_songs, rank_col)
+    return playlist.reset_index(drop=True), weights, dominant
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP — load everything
+# BOOTSTRAP
 # ══════════════════════════════════════════════════════════════════════════════
-
 bundle   = load_models()
 metadata = load_metadata()
+perf     = metadata.get("model_performance", {})
 
-# Dataset — try disk first, then fall back to sidebar uploader
-df = load_dataset()
+AVAILABLE_MODELS = [n for n in MODEL_FILES if bundle and n in bundle]
 
-if df is None:
-    st.warning(
-        "⚠️ Dataset not found at `data/spotify_dataset_withemotion.csv`.\n\n"
-        "Upload it below (the app will process it in memory for this session)."
+if not bundle or not AVAILABLE_MODELS:
+    st.error(
+        "❌ No classifier models found in `model/`.\n\n"
+        "Make sure `model/lightgbm_model.pkl`, `model/tfidf.pkl`, etc. exist."
     )
-    uploaded = st.sidebar.file_uploader(
-        "Upload spotify_dataset_withemotion.csv",
-        type="csv",
-        key="dataset_upload",
-    )
-    if uploaded is not None:
-        try:
-            _df = pd.read_csv(uploaded)
-            if "emotion_4" not in _df.columns and "emotion" in _df.columns:
-                _df["emotion"] = _df["emotion"].replace({"Love": "love", "angry": "anger"})
-                _df["emotion_4"] = _df["emotion"].map(EMOTION_4_MAP)
-            valid = list(EMOTION_STYLE.keys())
-            _df   = _df[_df["emotion_4"].isin(valid)].copy()
-            if "Artist(s)" in _df.columns and "song" in _df.columns:
-                _df = _df.drop_duplicates(subset=["Artist(s)", "song"], keep="first")
-            for col in PRIMARY_AUDIO_COLS:
-                if col in _df.columns:
-                    _df[col] = pd.to_numeric(_df[col], errors="coerce")
-            df = _df.reset_index(drop=True)
-            st.success(f"✅ Dataset loaded from upload — {len(df):,} tracks.")
-        except Exception as exc:
-            st.error(f"❌ Upload failed: {exc}")
-
-if df is None:
-    st.error("Cannot run without a dataset. Please add `data/spotify_dataset_withemotion.csv` or upload it.")
     st.stop()
 
-# Available classifiers
-AVAILABLE_MODELS = [n for n in MODEL_FILES if bundle and n in bundle]
-perf             = metadata.get("model_performance", {})
+best_acc = max((v.get("accuracy",    0) for v in perf.values()), default=0)
+best_f1  = max((v.get("f1_weighted", 0) for v in perf.values()), default=0)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
-
 with st.sidebar:
     st.markdown("## 🎵 MoodSense")
     st.markdown("**Music Emotion Classifier**")
     st.markdown("---")
 
-    st.markdown("#### 📊 Dataset")
-    st.metric("Tracks", f"{len(df):,}")
-    ec = df["emotion_4"].value_counts()
-    for em, cnt in ec.items():
-        pct = cnt / len(df) * 100
-        st.markdown(f"{EMOTION_STYLE[em]['emoji']} **{em.title()}** — {pct:.1f}%")
+    st.markdown("#### 🤖 Active Model")
+    def _lbl(n: str) -> str:
+        p   = perf.get(n.lower(), {})
+        acc = p.get("accuracy")
+        return f"{n} ({acc*100:.1f}%)" if acc else n
+
+    model_choice_label = st.selectbox("Model", [_lbl(m) for m in AVAILABLE_MODELS])
+    model_key          = model_choice_label.split(" ")[0]
 
     st.markdown("---")
-    st.markdown("#### 🤖 Active Model")
-
-    if AVAILABLE_MODELS:
-        def _lbl(n):
-            p   = perf.get(n.lower(), {})
-            acc = p.get("accuracy")
-            return f"{n} ({acc*100:.1f}%)" if acc else n
-
-        model_choice_label = st.selectbox("Model", [_lbl(m) for m in AVAILABLE_MODELS])
-        model_key          = model_choice_label.split(" ")[0]
-    else:
-        st.error("No classifier models found in model/")
-        model_key = None
+    st.markdown("#### 📊 Model Stats")
+    if best_acc: st.metric("Best Test Accuracy", f"{best_acc*100:.2f}%")
+    if best_f1:  st.metric("Best Weighted F1",   f"{best_f1:.4f}")
+    n_feat = metadata.get("num_features")
+    if n_feat: st.metric("Feature Dimensions",   f"{n_feat:,}")
 
     st.markdown("---")
     st.markdown("#### 📚 Project")
     st.markdown("**Course:** MS DSP 422\n\n**Team:** Group 3")
-    if metadata:
-        st.caption(f"Trained: {metadata.get('training_date', '—')}")
-        st.caption(f"Features: {metadata.get('num_features', '—'):,}" if isinstance(metadata.get("num_features"), int) else "")
+    if metadata.get("training_date"):
+        st.caption(f"Trained: {metadata['training_date']}")
+
+    st.markdown("---")
+    st.markdown("#### 🎭 Emotions")
+    for em, s in EMOTION_STYLE.items():
+        st.markdown(f"{s['emoji']} **{em.title()}**")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HEADER
+# HERO + KPI ROW
 # ══════════════════════════════════════════════════════════════════════════════
-
 st.markdown("""
 <div class="hero">
   <h1 class="hero-title">🎵 MoodSense</h1>
@@ -786,17 +615,17 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-best_acc = max((v.get("accuracy", 0) for v in perf.values()), default=0)
-best_f1  = max((v.get("f1_weighted", 0) for v in perf.values()), default=0)
-n_feat   = metadata.get("num_features", "—")
+n_feat_v  = metadata.get("num_features", "—")
+n_train_v = metadata.get("training_samples", "—")
 
-c1, c2, c3, c4 = st.columns(4)
-for col, val, lbl in [
-    (c1, f"{len(df):,}",                                  "Dataset Tracks"),
-    (c2, f"{best_acc*100:.1f}%" if best_acc else "—",     "Best Accuracy"),
-    (c3, f"{best_f1:.4f}"       if best_f1  else "—",     "Best Weighted F1"),
-    (c4, f"{n_feat:,}" if isinstance(n_feat, int) else str(n_feat), "Total Features"),
-]:
+for col, val, lbl in zip(
+    st.columns(4),
+    [f"{best_acc*100:.1f}%" if best_acc else "—",
+     f"{best_f1:.4f}"       if best_f1  else "—",
+     f"{n_feat_v:,}" if isinstance(n_feat_v, int) else str(n_feat_v),
+     f"{n_train_v:,}" if isinstance(n_train_v, int) else str(n_train_v)],
+    ["Best Accuracy", "Best Weighted F1", "Feature Dimensions", "Training Samples"],
+):
     col.markdown(
         f'<div class="kpi"><p class="kpi-val">{val}</p>'
         f'<p class="kpi-lbl">{lbl}</p></div>',
@@ -805,218 +634,351 @@ for col, val, lbl in [
 
 st.markdown("---")
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎯 Classify Song",
-    "🎵 Explore Dataset",
-    "📊 Analytics",
+    "📋 Batch Classify",
+    "🗺️ Emotion Atlas",
     "🔬 Model Performance",
     "🎧 Your Mood, Your Playlist",
 ])
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — CLASSIFY SONG
+# TAB 1 — CLASSIFY A SINGLE SONG
 # ─────────────────────────────────────────────────────────────────────────────
 with tab1:
     st.header("🎯 Classify a Song's Emotion")
+    st.caption("Enter audio features and optional lyrics → the ML model predicts emotion.")
 
-    if not AVAILABLE_MODELS or model_key is None:
-        st.error("No trained models available. Add pkl files to the model/ directory.")
-    else:
-        col_a, col_b = st.columns(2)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Song Info")
+        song_name   = st.text_input("Song Title",  placeholder="e.g. Bohemian Rhapsody")
+        artist_name = st.text_input("Artist",       placeholder="e.g. Queen")
+        lyrics      = st.text_area(
+            "Lyrics (optional — activates TF-IDF features)",
+            placeholder="Paste lyrics here…", height=180,
+        )
 
-        with col_a:
-            st.subheader("Song Info")
-            song_name   = st.text_input("Song Title *",  placeholder="e.g. Bohemian Rhapsody")
-            artist_name = st.text_input("Artist *",       placeholder="e.g. Queen")
-            lyrics      = st.text_area(
-                "Lyrics (optional — improves accuracy)",
-                placeholder="Paste lyrics here…", height=170,
+    with col_b:
+        st.subheader("Audio Features")
+        energy   = st.slider("⚡ Energy",           0.0, 1.0, 0.65, 0.01, key="s1_e")
+        dance    = st.slider("💃 Danceability",     0.0, 1.0, 0.60, 0.01, key="s1_d")
+        pos      = st.slider("😊 Positiveness",     0.0, 1.0, 0.50, 0.01, key="s1_p")
+        acoustic = st.slider("🎸 Acousticness",     0.0, 1.0, 0.30, 0.01, key="s1_ac")
+        tempo    = st.slider("🥁 Tempo (BPM)",      60,  200, 120,  1,    key="s1_t")
+        speech   = st.slider("🗣 Speechiness",      0.0, 1.0, 0.05, 0.01, key="s1_sp")
+        instr    = st.slider("🎹 Instrumentalness", 0.0, 1.0, 0.10, 0.01, key="s1_i")
+        loudness = st.slider("🔊 Loudness (dB)",   -60.0, 0.0, -7.0, 0.5, key="s1_l")
+        pop      = st.slider("⭐ Popularity",       0,   100, 50,    1,   key="s1_pp")
+
+    st.markdown("---")
+    if st.button("🎵 Classify Emotion", type="primary", use_container_width=True, key="btn_classify"):
+        song_vals = {
+            "Energy": energy, "Danceability": dance, "Positiveness": pos,
+            "Acousticness": acoustic, "Tempo": tempo, "Speechiness": speech,
+            "Instrumentalness": instr, "Loudness": loudness,
+            "Popularity": pop, "Liveness": 0.1,
+        }
+        with st.spinner("Running ML inference…"):
+            X          = build_feature_matrix([song_vals], [lyrics], bundle)
+            labels, pr = run_inference(X, bundle, model_key)
+
+        em     = str(labels[0])
+        pr0    = pr[0]
+        le_    = bundle.get("label_encoder")
+        cls    = list(le_.classes_) if le_ is not None else list(EMOTION_STYLE.keys())
+        conf   = float(pr0.max())
+        style  = EMOTION_STYLE.get(em, {"color":"#64748b","emoji":"🎵","desc":""})
+        probs  = {str(c): float(p) for c, p in zip(cls, pr0)}
+
+        st.success("✅ Classification complete!")
+        r1, r2 = st.columns(2)
+
+        with r1:
+            st.markdown(
+                f'<div class="emo-card" style="background:{style["color"]};color:white;">'
+                f'<div class="emo-emoji">{style["emoji"]}</div>'
+                f'<div class="emo-name">{em.upper()}</div>'
+                f'<div class="emo-desc">{style["desc"]}</div>'
+                f'</div>', unsafe_allow_html=True,
             )
+            level = "High" if conf > .65 else "Medium" if conf > .45 else "Low"
+            st.metric("Model Confidence", f"{conf*100:.1f}%", delta=level)
+            if song_name:
+                st.markdown(f"**🎵 {song_name}**" +
+                            (f" — *{artist_name}*" if artist_name else ""))
+            st.caption(f"Model: {model_key}")
 
-        with col_b:
-            st.subheader("Audio Features")
-            energy   = st.slider("⚡ Energy",              0.0, 1.0, 0.65, 0.01)
-            dance    = st.slider("💃 Danceability",        0.0, 1.0, 0.60, 0.01)
-            pos      = st.slider("😊 Positiveness",        0.0, 1.0, 0.50, 0.01)
-            acoustic = st.slider("🎸 Acousticness",        0.0, 1.0, 0.30, 0.01)
-            tempo    = st.slider("🥁 Tempo (BPM)",         60,  200, 120,  1)
-            speech   = st.slider("🗣 Speechiness",         0.0, 1.0, 0.05, 0.01)
-            instr    = st.slider("🎹 Instrumentalness",    0.0, 1.0, 0.10, 0.01)
-            loudness = st.slider("🔊 Loudness (dB)",      -60.0, 0.0, -7.0, 0.5)
-            pop      = st.slider("⭐ Popularity",          0,   100, 50,   1)
-
-        st.markdown("---")
-        go = st.button("🎵 Classify Emotion", type="primary", use_container_width=True)
-
-        if go:
-            if not song_name or not artist_name:
-                st.warning("Please enter a song title and artist name.")
-            else:
-                with st.spinner("Analysing emotion…"):
-                    song_vals = {
-                        "Energy": energy, "Danceability": dance, "Positiveness": pos,
-                        "Acousticness": acoustic, "Tempo": tempo, "Speechiness": speech,
-                        "Instrumentalness": instr, "Loudness": loudness,
-                        "Popularity": pop, "Liveness": 0.1,
-                    }
-                    X   = build_feature_vector(song_vals, lyrics, bundle)
-                    res = predict(X, bundle, model_key)
-
-                if res is None:
-                    st.error("Prediction failed — check model logs.")
-                else:
-                    em    = res["prediction"]
-                    conf  = res["confidence"]
-                    probs = res["probabilities"]
-                    style = EMOTION_STYLE.get(em, {"color": "#666", "emoji": "🎵", "desc": ""})
-
-                    st.success("✅ Classification complete!")
-                    r1, r2 = st.columns(2)
-
-                    with r1:
-                        st.markdown(
-                            f'<div class="emo-card" style="background:{style["color"]};color:white;">'
-                            f'<div class="emo-emoji">{style["emoji"]}</div>'
-                            f'<div class="emo-name">{em.upper()}</div>'
-                            f'<div class="emo-desc">{style["desc"]}</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                        level = "High" if conf > .65 else "Medium" if conf > .45 else "Low"
-                        st.metric("Model Confidence", f"{conf*100:.1f}%", delta=level)
-                        st.caption(f"Model: {model_key}")
-
-                    with r2:
-                        st.subheader("Probability Distribution")
-                        prob_df = pd.DataFrame({
-                            "Emotion":     [e.title() for e in probs],
-                            "Probability": list(probs.values()),
-                        }).sort_values("Probability", ascending=False)
-
-                        colors = {e.title(): EMOTION_STYLE[e]["color"] for e in EMOTION_STYLE}
-                        fig = px.bar(
-                            prob_df, x="Emotion", y="Probability",
-                            color="Emotion", color_discrete_map=colors, text="Probability",
-                        )
-                        fig.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-                        fig.update_layout(
-                            showlegend=False, height=320, yaxis_range=[0, 1],
-                            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    st.markdown("---")
-                    st.subheader(f"🎵 Similar {em.title()} Songs in Dataset")
-                    sim = similar_songs(song_vals, df, em, n=10)
-
-                    if not sim.empty:
-                        sim_display = sim.rename(columns={
-                            "song": "🎵 Song", "Artist(s)": "🎤 Artist",
-                            "Energy": "⚡ Energy", "Positiveness": "😊 Positivity",
-                            "_dist": "📏 Distance",
-                        })
-                        sim_display["📏 Distance"] = sim_display["📏 Distance"].round(4)
-                        st.dataframe(
-                            sim_display[["🎵 Song", "🎤 Artist", "⚡ Energy",
-                                         "😊 Positivity", "📏 Distance"]],
-                            use_container_width=True, hide_index=True,
-                        )
-                    else:
-                        st.info("No similar songs found.")
+        with r2:
+            st.subheader("Probability Distribution")
+            prob_df = pd.DataFrame({
+                "Emotion":     [e.title() for e in probs],
+                "Probability": list(probs.values()),
+            }).sort_values("Probability", ascending=False)
+            fig = px.bar(
+                prob_df, x="Emotion", y="Probability", color="Emotion",
+                color_discrete_map={e.title(): EMOTION_STYLE.get(e, {}).get("color","#ccc")
+                                    for e in probs},
+                text="Probability",
+            )
+            fig.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+            fig.update_layout(showlegend=False, height=320, yaxis_range=[0,1],
+                              plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — EXPLORE DATASET
+# TAB 2 — BATCH CLASSIFY
 # ─────────────────────────────────────────────────────────────────────────────
 with tab2:
-    st.header("🎵 Explore the Dataset")
+    st.header("📋 Batch Classify")
+    st.caption("Classify multiple songs at once via CSV upload or manual entry. "
+               "The ML model runs on every row.")
 
-    sel_em = st.selectbox(
-        "Filter by emotion:",
-        ["All"] + list(EMOTION_STYLE.keys()),
-        format_func=lambda x: (
-            f"{EMOTION_STYLE[x]['emoji']} {x.title()}" if x != "All" else "All Emotions"
-        ),
-    )
-
-    fdf = df if sel_em == "All" else df[df["emotion_4"] == sel_em]
-    st.info(f"Showing {len(fdf):,} songs")
-
-    disp_cols  = [c for c in ["song", "Artist(s)", "emotion_4", "Energy",
-                               "Positiveness", "Danceability"] if c in fdf.columns]
-    rename_map = {
-        "song": "🎵 Song", "Artist(s)": "🎤 Artist", "emotion_4": "🎭 Emotion",
-        "Energy": "⚡ Energy", "Positiveness": "😊 Positivity", "Danceability": "💃 Dance",
-    }
-    st.dataframe(
-        fdf[disp_cols].head(200).rename(columns=rename_map),
-        use_container_width=True, height=500,
-    )
-
-    csv = fdf[disp_cols].to_csv(index=False).encode()
+    # Template download
+    tmpl_cols = ["song", "artist", "lyrics"] + PRIMARY_AUDIO_COLS
+    tmpl_row  = {"song":"Example Song","artist":"Example Artist","lyrics":"",
+                 "Energy":0.75,"Danceability":0.72,"Positiveness":0.78,
+                 "Speechiness":0.07,"Liveness":0.17,"Acousticness":0.22,
+                 "Instrumentalness":0.04,"Tempo":128,"Loudness":-5,"Popularity":65}
     st.download_button(
-        f"📥 Download CSV ({len(fdf):,} songs)", csv,
-        f"moodsense_{sel_em}.csv", "text/csv",
+        "📥 Download CSV Template",
+        pd.DataFrame([tmpl_row])[tmpl_cols].to_csv(index=False).encode(),
+        "moodsense_batch_template.csv", "text/csv",
     )
+
+    batch_mode = st.radio("Input method:", ["Upload CSV", "Manual entry"], horizontal=True)
+    songs_to_classify: list[dict] = []
+
+    if batch_mode == "Upload CSV":
+        uploaded = st.file_uploader("Upload your CSV", type="csv")
+        if uploaded:
+            try:
+                up_df = pd.read_csv(uploaded)
+                st.info(f"Loaded {len(up_df)} rows.")
+                st.dataframe(up_df.head(5), use_container_width=True)
+                for _, row in up_df.iterrows():
+                    songs_to_classify.append({
+                        "_song":   str(row.get("song",   "—")),
+                        "_artist": str(row.get("artist", "—")),
+                        "_lyrics": str(row.get("lyrics", "")),
+                        **{col: float(row[col]) if col in row.index and pd.notna(row[col])
+                                else AUDIO_RANGES[col][2]
+                           for col in PRIMARY_AUDIO_COLS},
+                    })
+            except Exception as exc:
+                st.error(f"CSV parse error: {exc}")
+    else:
+        n_manual = st.number_input("Number of songs", 1, 20, 3, 1)
+        for i in range(int(n_manual)):
+            with st.expander(f"Song #{i+1}", expanded=(i == 0)):
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    sn = st.text_input("Title",  key=f"mn_{i}", placeholder="Song title")
+                    sa = st.text_input("Artist", key=f"ma_{i}", placeholder="Artist name")
+                    sl = st.text_area("Lyrics (optional)", key=f"ml_{i}", height=80)
+                with mc2:
+                    se  = st.slider("Energy",       0.0,1.0,0.65,0.01, key=f"me_{i}")
+                    sd  = st.slider("Danceability", 0.0,1.0,0.60,0.01, key=f"md_{i}")
+                    sp_ = st.slider("Positiveness", 0.0,1.0,0.50,0.01, key=f"mp_{i}")
+                    st_ = st.slider("Tempo (BPM)",  60,200,120,1,       key=f"mt_{i}")
+                    sac = st.slider("Acousticness", 0.0,1.0,0.30,0.01, key=f"mac_{i}")
+                songs_to_classify.append({
+                    "_song":sn or f"Song {i+1}","_artist":sa or "Unknown","_lyrics":sl,
+                    "Energy":se,"Danceability":sd,"Positiveness":sp_,"Tempo":float(st_),
+                    "Acousticness":sac,"Speechiness":0.05,"Liveness":0.1,
+                    "Instrumentalness":0.1,"Loudness":-7.0,"Popularity":50,
+                })
+
+    if st.button("🎵 Classify All Songs", type="primary",
+                 use_container_width=True, key="btn_batch",
+                 disabled=len(songs_to_classify) == 0):
+        audio_rows  = [{k:v for k,v in s.items() if not k.startswith("_")}
+                       for s in songs_to_classify]
+        lyrics_list = [s.get("_lyrics","") for s in songs_to_classify]
+
+        with st.spinner(f"Running ML on {len(audio_rows)} songs…"):
+            X_b            = build_feature_matrix(audio_rows, lyrics_list, bundle)
+            b_labels, b_pr = run_inference(X_b, bundle, model_key)
+
+        le_     = bundle.get("label_encoder")
+        cls     = list(le_.classes_) if le_ is not None else list(EMOTION_STYLE.keys())
+        st.success(f"✅ Classified {len(audio_rows)} songs!")
+        st.markdown("---")
+        st.markdown(f"### Results — {model_key}")
+
+        result_rows = []
+        for idx, (song, lbl, pr_row) in enumerate(
+                zip(songs_to_classify, b_labels, b_pr), 1):
+            em       = str(lbl)
+            conf     = float(pr_row.max())
+            es       = EMOTION_STYLE.get(em, {"color":"#64748b","emoji":"🎵"})
+            conf_pct = int(conf * 100)
+            st.markdown(
+                f'<div class="batch-row">'
+                f'<span class="batch-num">{idx}</span>'
+                f'<div class="batch-info">'
+                f'<div class="batch-name">{song.get("_song","—")}</div>'
+                f'<div class="batch-artist">{song.get("_artist","—")}</div>'
+                f'</div>'
+                f'<span class="badge" style="background:{es["color"]}22;color:{es["color"]};">'
+                f'{es["emoji"]} {em.title()}</span>'
+                f'<div class="conf-wrap" title="{conf_pct}% confidence">'
+                f'<div class="conf-bg"><div class="conf-fg" '
+                f'style="width:{conf_pct}%;background:{es["color"]};"></div></div>'
+                f'</div></div>', unsafe_allow_html=True,
+            )
+            result_rows.append({
+                "Song":             song.get("_song","—"),
+                "Artist":           song.get("_artist","—"),
+                "Predicted Emotion":em,
+                "Confidence":       round(conf, 4),
+                **{f"P({c})": round(float(p),4) for c,p in zip(cls, pr_row)},
+            })
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            f"📥 Download Results CSV ({len(result_rows)} songs)",
+            pd.DataFrame(result_rows).to_csv(index=False).encode(),
+            "moodsense_batch_results.csv", "text/csv",
+            use_container_width=True,
+        )
+
+        st.markdown("---")
+        st.subheader("Batch Summary")
+        lc = pd.Series(b_labels).value_counts()
+        fig_pie = px.pie(
+            values=lc.values, names=[e.title() for e in lc.index], color=lc.index,
+            color_discrete_map={e: EMOTION_STYLE.get(e,{}).get("color","#ccc") for e in lc.index},
+            hole=0.4, title="Emotion Distribution in Batch",
+        )
+        fig_pie.update_layout(height=350)
+        st.plotly_chart(fig_pie, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 — ANALYTICS
+# TAB 3 — EMOTION ATLAS
 # ─────────────────────────────────────────────────────────────────────────────
 with tab3:
-    st.header("📊 Emotion Analytics")
+    st.header("🗺️ Emotion Atlas")
+    st.caption("Explore what each emotion sounds like in audio feature space. "
+               "Adjust sliders to see the model predict in real time.")
 
-    ec = df["emotion_4"].value_counts()
-    c1, c2 = st.columns([2, 1])
+    centroids = get_centroids(metadata)
 
-    with c1:
-        fig = px.pie(
-            values=ec.values,
-            names=[e.title() for e in ec.index],
-            color=ec.index,
-            color_discrete_map={e: EMOTION_STYLE[e]["color"] for e in ec.index},
-            hole=.4, title="Emotion Distribution",
-        )
-        fig.update_traces(textposition="inside", textinfo="percent+label")
-        fig.update_layout(height=420, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with c2:
-        st.markdown("### Breakdown")
-        for em, cnt in ec.items():
-            pct = cnt / len(df) * 100
-            st.markdown(f"{EMOTION_STYLE[em]['emoji']} **{em.title()}**: {cnt:,} ({pct:.1f}%)")
+    # ── Emotion profile cards ─────────────────────────────────────────────
+    st.subheader("Audio Fingerprint per Emotion")
+    feat_labels = {
+        "Energy":"⚡","Danceability":"💃","Positiveness":"😊",
+        "Acousticness":"🎸","Speechiness":"🗣","Tempo":"🥁",
+    }
+    atlas_cols = st.columns(4)
+    for (em, s), col in zip(EMOTION_STYLE.items(), atlas_cols):
+        c = centroids.get(em, {})
+        with col:
+            st.markdown(
+                f'<div class="atlas-card" style="border-top:4px solid {s["color"]};">'
+                f'<div class="atlas-title">{s["emoji"]} {em.title()}</div>'
+                f'<div class="atlas-sub">{s["desc"]}</div>',
+                unsafe_allow_html=True,
+            )
+            for feat, icon in feat_labels.items():
+                raw     = c.get(feat, AUDIO_RANGES[feat][2])
+                lo, hi, _ = AUDIO_RANGES[feat]
+                pct     = int((raw - lo) / (hi - lo) * 100)
+                label   = f"{raw:.0f}" if feat == "Tempo" else f"{raw:.2f}"
+                st.markdown(
+                    f'<div style="margin:.35rem 0;">'
+                    f'<span style="font-size:.78rem;color:#64748b;">{icon} {feat}</span>'
+                    f'<div style="background:#e2e8f0;border-radius:4px;height:6px;margin:.2rem 0;">'
+                    f'<div style="width:{pct}%;background:{s["color"]};border-radius:4px;height:6px;"></div>'
+                    f'</div>'
+                    f'<span style="font-size:.75rem;font-weight:600;">{label}</span>'
+                    f'</div>', unsafe_allow_html=True,
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.subheader("📈 Audio Features by Emotion")
-    avail_feat = [c for c in ["Energy", "Positiveness", "Danceability", "Acousticness", "Tempo"]
-                  if c in df.columns]
-    feat = st.selectbox("Feature:", avail_feat)
-    fig2 = px.violin(
-        df, x="emotion_4", y=feat, color="emotion_4",
-        color_discrete_map={e: EMOTION_STYLE[e]["color"] for e in EMOTION_STYLE},
-        box=True, points=False, labels={"emotion_4": "Emotion", feat: feat},
+
+    # ── Radar chart ───────────────────────────────────────────────────────
+    st.subheader("Comparative Radar Chart")
+    radar_feats = ["Energy","Danceability","Positiveness","Acousticness","Speechiness"]
+    fig_radar   = go.Figure()
+    for em, s in EMOTION_STYLE.items():
+        c    = centroids.get(em, {})
+        vals = [c.get(f, 0.5) for f in radar_feats] + [c.get(radar_feats[0], 0.5)]
+        fig_radar.add_trace(go.Scatterpolar(
+            r=vals, theta=radar_feats + [radar_feats[0]],
+            fill="toself", name=em.title(),
+            line=dict(color=s["color"]), fillcolor=s["color"], opacity=0.3,
+        ))
+    fig_radar.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0,1])),
+        showlegend=True, height=440,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
-    fig2.update_layout(showlegend=False, height=420)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig_radar, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📊 Feature Scatter by Emotion")
-    avail2 = [c for c in ["Energy", "Positiveness", "Danceability", "Acousticness"] if c in df.columns]
-    if len(avail2) >= 2:
-        fx = st.selectbox("X-axis:", avail2, index=0)
-        fy = st.selectbox("Y-axis:", avail2, index=min(1, len(avail2)-1))
-        fig3 = px.scatter(
-            df.sample(min(5_000, len(df)), random_state=42),
-            x=fx, y=fy, color="emotion_4",
-            color_discrete_map={e: EMOTION_STYLE[e]["color"] for e in EMOTION_STYLE},
-            opacity=.5, height=420,
-        )
-        st.plotly_chart(fig3, use_container_width=True)
+
+    # ── Live prediction explorer ──────────────────────────────────────────
+    st.subheader("🎛️ Live Prediction Explorer")
+    st.caption("Adjust sliders — the model predicts on every change, no button required.")
+
+    lp1, lp2 = st.columns([1, 1])
+    with lp1:
+        lp_e  = st.slider("⚡ Energy",           0.0,1.0,0.65,0.01, key="lp_e")
+        lp_d  = st.slider("💃 Danceability",     0.0,1.0,0.60,0.01, key="lp_d")
+        lp_p  = st.slider("😊 Positiveness",     0.0,1.0,0.50,0.01, key="lp_p")
+        lp_ac = st.slider("🎸 Acousticness",     0.0,1.0,0.30,0.01, key="lp_ac")
+        lp_t  = st.slider("🥁 Tempo (BPM)",      60,200,120,1,       key="lp_t")
+
+    lp_vals = {
+        "Energy":lp_e,"Danceability":lp_d,"Positiveness":lp_p,
+        "Acousticness":lp_ac,"Tempo":float(lp_t),
+        "Speechiness":0.05,"Liveness":0.1,"Instrumentalness":0.1,
+        "Loudness":-7.0,"Popularity":50,
+    }
+    try:
+        X_lp           = build_feature_matrix([lp_vals], [""], bundle)
+        lp_lbl, lp_pr  = run_inference(X_lp, bundle, model_key)
+        lp_em    = str(lp_lbl[0])
+        lp_style = EMOTION_STYLE.get(lp_em, {"color":"#64748b","emoji":"🎵","desc":""})
+        lp_conf  = float(lp_pr[0].max())
+        le_      = bundle.get("label_encoder")
+        lp_cls   = list(le_.classes_) if le_ is not None else list(EMOTION_STYLE.keys())
+        lp_probs = {str(c): float(p) for c, p in zip(lp_cls, lp_pr[0])}
+
+        with lp2:
+            st.markdown(
+                f'<div class="emo-card" style="background:{lp_style["color"]};color:white;padding:1.5rem;">'
+                f'<div style="font-size:3.5rem;">{lp_style["emoji"]}</div>'
+                f'<div class="emo-name" style="font-size:1.8rem;">{lp_em.upper()}</div>'
+                f'<div class="emo-desc">{lp_conf*100:.1f}% confidence</div>'
+                f'</div>', unsafe_allow_html=True,
+            )
+            df_lp = pd.DataFrame({
+                "Emotion":     [e.title() for e in lp_probs],
+                "Probability": list(lp_probs.values()),
+            }).sort_values("Probability", ascending=False)
+            fig_lp = px.bar(
+                df_lp, x="Emotion", y="Probability", color="Emotion",
+                color_discrete_map={e.title(): EMOTION_STYLE.get(e,{}).get("color","#ccc")
+                                    for e in lp_probs},
+                text="Probability",
+            )
+            fig_lp.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+            fig_lp.update_layout(showlegend=False, height=260, yaxis_range=[0,1],
+                                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                                 margin=dict(l=0,r=0,t=10,b=10))
+            st.plotly_chart(fig_lp, use_container_width=True)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1035,40 +997,51 @@ with tab4:
         k1.metric("Best Model",       best_name)
         k2.metric("Test Accuracy",    f"{best_m.get('accuracy',0)*100:.2f}%")
         k3.metric("Weighted F1",      f"{best_m.get('f1_weighted',0):.4f}")
-        k4.metric("Training Samples",
-                  f"{metadata.get('training_samples','—'):,}"
-                  if isinstance(metadata.get("training_samples"), int) else "—")
+        n_tr = metadata.get("training_samples","—")
+        k4.metric("Training Samples", f"{n_tr:,}" if isinstance(n_tr,int) else str(n_tr))
 
         st.markdown("---")
-        st.subheader("📊 Model Comparison (from model_metadata.json)")
-
+        st.subheader("📊 Model Comparison")
         perf_df = pd.DataFrame([
-            {"Model": m, "Accuracy": v.get("accuracy", 0), "Weighted F1": v.get("f1_weighted", 0)}
-            for m, v in perf.items()
+            {"Model":m,"Accuracy":v.get("accuracy",0),"Weighted F1":v.get("f1_weighted",0)}
+            for m,v in perf.items()
         ]).sort_values("Accuracy", ascending=False)
-
-        fig = px.bar(
+        fig_perf = px.bar(
             perf_df.melt(id_vars="Model", var_name="Metric", value_name="Score"),
             x="Model", y="Score", color="Metric", barmode="group",
-            title="Model Performance Comparison",
-            color_discrete_sequence=["#1d4ed8", "#3b82f6"],
+            title="All Models — Accuracy & Weighted F1",
+            color_discrete_sequence=["#1d4ed8","#3b82f6"],
         )
-        fig.update_layout(height=420, yaxis_range=[0, 1])
-        st.plotly_chart(fig, use_container_width=True)
+        fig_perf.update_layout(height=420, yaxis_range=[0,1])
+        st.plotly_chart(fig_perf, use_container_width=True)
 
         st.markdown("---")
         st.subheader("Feature Breakdown")
         fb = metadata.get("feature_breakdown", {})
         if fb:
-            fb_df  = pd.DataFrame({"Feature Group": list(fb.keys()), "Count": list(fb.values())})
+            c1f,c2f,c3f = st.columns(3)
+            c1f.metric("TF-IDF Features", f"{fb.get('tfidf',0):,}")
+            c2f.metric("Audio Features",  f"{fb.get('audio',0):,}")
+            c3f.metric("VADER Features",  f"{fb.get('vader',0):,}")
             fb_fig = px.bar(
-                fb_df, x="Feature Group", y="Count", color="Feature Group",
-                color_discrete_sequence=["#0f172a", "#1d4ed8", "#3b82f6"],
+                pd.DataFrame({"Feature Group":list(fb.keys()),"Count":list(fb.values())}),
+                x="Feature Group", y="Count", color="Feature Group",
+                color_discrete_sequence=["#0f172a","#1d4ed8","#3b82f6"],
+                title="Features by Type",
             )
-            fb_fig.update_layout(showlegend=False, height=320)
+            fb_fig.update_layout(showlegend=False, height=300)
             st.plotly_chart(fb_fig, use_container_width=True)
         else:
             st.info("Feature breakdown not found in metadata.")
+
+        st.markdown("---")
+        st.subheader("📋 Full Results Table")
+        raw_tbl = pd.DataFrame([
+            {"Model":m,"Accuracy":f"{v.get('accuracy',0)*100:.2f}%",
+             "Weighted F1":f"{v.get('f1_weighted',0):.4f}"}
+            for m,v in perf.items()
+        ]).sort_values("Accuracy", ascending=False)
+        st.dataframe(raw_tbl, use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1082,14 +1055,12 @@ with tab5:
             🎧 Your Mood, Your Playlist
         </h2>
         <p style="opacity:.85;margin:0;font-size:1rem;">
-            Describe a vibe, a moment, a feeling. The ML pipeline reads your words, maps them to
-            emotion space via VADER + TF-IDF cosine similarity, then runs the trained classifier
-            on the dataset to curate a playlist. No rules — all signal.
+            Describe a vibe, a moment, a feeling. NLP maps your words to emotion space,
+            derives a target audio profile, generates synthetic candidates via Gaussian noise,
+            then runs the ML classifier to curate your playlist. No dataset. All model.
         </p>
     </div>
     """, unsafe_allow_html=True)
-
-    centroids = get_audio_centroids(df)
 
     col_pre, col_custom = st.columns([1, 2], gap="large")
 
@@ -1102,185 +1073,161 @@ with tab5:
                 key=f"preset_{p['id']}",
                 use_container_width=True,
             ):
-                st.session_state["playlist_prompt"] = p["prompt"]
-                st.session_state["playlist_n"]      = p["n"]
-                st.session_state["playlist_title"]  = f"{p['icon']} {p['title']}"
-                st.session_state["run_playlist"]    = True
+                st.session_state.update({
+                    "pl_prompt":p["prompt"], "pl_n":p["n"],
+                    "pl_title":f"{p['icon']} {p['title']}", "pl_run":True,
+                })
 
     with col_custom:
         st.markdown("#### ✍️ Describe Your Own Vibe")
-        st.caption("Type anything — a feeling, a scene, a moment.")
+        st.caption("Type anything — a feeling, a scene, a moment. The model does the rest.")
         prompt_input = st.text_area(
             "Your mood prompt",
-            placeholder=(
-                'e.g. "Sunday morning coffee, soft rain on the window, '
-                'feeling nostalgic but okay…"'
-            ),
-            height=110,
-            label_visibility="collapsed",
-            key="custom_prompt_input",
+            placeholder='e.g. "Sunday morning coffee, soft rain on the window, feeling nostalgic…"',
+            height=110, label_visibility="collapsed", key="pl_prompt_input",
         )
-        ca, cb, cc = st.columns([2, 1, 1])
+        ca, cb, cc = st.columns([2,1,1])
         with ca:
-            n_songs_custom = st.slider("Playlist length", 5, 40, 20, 5, key="n_slider")
+            n_songs_custom = st.slider("Playlist length", 5, 40, 20, 5, key="pl_n_slider")
         with cb:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🎵 Generate", type="primary", use_container_width=True, key="gen_custom"):
+            if st.button("🎵 Generate", type="primary",
+                         use_container_width=True, key="pl_gen_btn"):
                 if prompt_input.strip():
-                    st.session_state["playlist_prompt"] = prompt_input.strip()
-                    st.session_state["playlist_n"]      = n_songs_custom
-                    st.session_state["playlist_title"]  = "🎧 Custom Playlist"
-                    st.session_state["run_playlist"]    = True
+                    st.session_state.update({
+                        "pl_prompt":prompt_input.strip(), "pl_n":n_songs_custom,
+                        "pl_title":"🎧 Custom Playlist", "pl_run":True,
+                    })
                 else:
                     st.warning("Please describe a mood or vibe first.")
         with cc:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🗑 Clear", use_container_width=True, key="clear_pl"):
-                for k in ["playlist_prompt", "playlist_n", "playlist_title",
-                          "run_playlist", "pl_result"]:
+            if st.button("🗑 Clear", use_container_width=True, key="pl_clear_btn"):
+                for k in ["pl_prompt","pl_n","pl_title","pl_run","pl_result"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
     # Run generator
-    if st.session_state.get("run_playlist"):
-        st.session_state["run_playlist"] = False
-        active_prompt = st.session_state.get("playlist_prompt", "")
-        active_n      = st.session_state.get("playlist_n", 20)
-        active_title  = st.session_state.get("playlist_title", "Your Playlist")
-
+    if st.session_state.get("pl_run"):
+        st.session_state["pl_run"] = False
+        active_prompt = st.session_state.get("pl_prompt", "")
+        active_n      = st.session_state.get("pl_n", 20)
+        active_title  = st.session_state.get("pl_title", "Your Playlist")
         st.markdown("---")
-        with st.spinner("🔮 Classifying songs through the ML model…"):
+        with st.spinner("🔮 Generating & classifying synthetic candidates…"):
             pl_df, emo_weights, dominant = generate_playlist(
-                prompt_text=active_prompt,
-                df=df,
-                bundle=bundle,
-                model_key=model_key,
-                n_songs=active_n,
-                centroids=centroids,
+                prompt=active_prompt, bundle=bundle,
+                model_key=model_key, metadata=metadata, n_songs=active_n,
             )
-            st.session_state["pl_result"] = {
-                "df": pl_df, "weights": emo_weights,
-                "dominant": dominant, "title": active_title,
-                "prompt": active_prompt,
-            }
+        st.session_state["pl_result"] = {
+            "df":pl_df, "weights":emo_weights, "dominant":dominant,
+            "title":active_title, "prompt":active_prompt,
+        }
 
     # Render result
     res = st.session_state.get("pl_result")
     if res and not res["df"].empty:
-        pl_df     = res["df"]
-        weights   = res["weights"]
-        dominant  = res["dominant"]
-        pl_title  = res["title"]
-        pl_prompt = res["prompt"]
+        pl_df   = res["df"];  weights  = res["weights"]
+        dominant= res["dominant"]; pl_title = res["title"]; pl_prompt = res["prompt"]
+        dom_s   = EMOTION_STYLE.get(dominant, {"color":"#1d4ed8","emoji":"🎵"})
 
         st.markdown("---")
-        dom_style = EMOTION_STYLE.get(dominant, {"color": "#1d4ed8", "emoji": "🎵"})
         st.markdown(
-            f'<div class="playlist-card" style="border-top:4px solid {dom_style["color"]};">'
+            f'<div class="playlist-card" style="border-top:4px solid {dom_s["color"]};">'
             f'<div class="playlist-header">{pl_title}</div>'
             f'<div class="playlist-meta">Prompt: <em>"{pl_prompt}"</em> &nbsp;·&nbsp; '
-            f'{len(pl_df)} tracks &nbsp;·&nbsp; Dominant: '
-            f'<strong>{dominant.title()}</strong> {dom_style["emoji"]}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
+            f'{len(pl_df)} tracks &nbsp;·&nbsp; '
+            f'Dominant: <strong>{dominant.title()}</strong> {dom_s["emoji"]}</div>'
+            f'</div>', unsafe_allow_html=True,
         )
 
-        rr1, rr2 = st.columns([1, 2])
+        rr1, rr2 = st.columns([1,2])
         with rr1:
             st.markdown("**NLP Emotion Signal**")
-            st.caption("VADER + TF-IDF cosine similarity mapped to emotion space")
+            st.caption("VADER + TF-IDF cosine → emotion space")
             w_df = pd.DataFrame({
-                "Emotion": [e.title() for e in weights],
-                "Weight":  list(weights.values()),
+                "Emotion":[e.title() for e in weights],
+                "Weight":list(weights.values()),
             }).sort_values("Weight")
             fig_w = px.bar(
-                w_df, x="Weight", y="Emotion", orientation="h",
-                color="Emotion",
+                w_df, x="Weight", y="Emotion", orientation="h", color="Emotion",
                 color_discrete_map={e.title(): EMOTION_STYLE[e]["color"] for e in EMOTION_STYLE},
                 text="Weight",
             )
             fig_w.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-            fig_w.update_layout(
-                showlegend=False, height=220,
-                xaxis_range=[0, max(weights.values()) * 1.35],
-                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=0, r=40, t=10, b=10),
-            )
+            fig_w.update_layout(showlegend=False, height=220,
+                                xaxis_range=[0, max(weights.values())*1.35],
+                                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                                margin=dict(l=0,r=40,t=10,b=10))
             st.plotly_chart(fig_w, use_container_width=True)
 
         with rr2:
             st.markdown("**Playlist Audio Profile**")
-            st.caption("Songs coloured by ML-predicted emotion")
-            color_col = "_pred_em" if "_pred_em" in pl_df.columns else "emotion_4"
+            st.caption("Each point = a model-classified synthetic candidate")
             if "Energy" in pl_df.columns and "Positiveness" in pl_df.columns:
-                sc_fig = px.scatter(
-                    pl_df, x="Energy", y="Positiveness",
-                    color=color_col,
+                sc = px.scatter(
+                    pl_df, x="Energy", y="Positiveness", color="_pred_em",
                     color_discrete_map={e: EMOTION_STYLE[e]["color"] for e in EMOTION_STYLE},
-                    hover_data=["song", "Artist(s)"] if "song" in pl_df.columns else [],
-                    opacity=.85, height=220,
+                    opacity=.8, height=220,
                 )
-                sc_fig.update_layout(
-                    showlegend=True, margin=dict(l=0, r=0, t=10, b=10),
-                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                )
-                st.plotly_chart(sc_fig, use_container_width=True)
+                sc.update_layout(showlegend=True, margin=dict(l=0,r=0,t=10,b=10),
+                                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(sc, use_container_width=True)
 
         st.markdown("---")
-        st.markdown(f"### 🎵 Tracklist — {len(pl_df)} songs")
+        st.markdown(f"### 🎵 Playlist — {len(pl_df)} AI-Curated Tracks")
+        st.caption("Synthetic audio profiles generated and classified by the ML model.")
 
-        conf_col = f"_conf_{dominant}" if f"_conf_{dominant}" in pl_df.columns else None
+        conf_col = (f"_conf_{dominant}" if f"_conf_{dominant}" in pl_df.columns
+                    else "_confidence")
+
         for idx, (_, row) in enumerate(pl_df.iterrows(), 1):
-            song_em  = row.get("_pred_em", row.get("emotion_4", dominant))
-            em_style = EMOTION_STYLE.get(str(song_em), {"color": "#64748b", "emoji": "🎵"})
-            conf_val = float(row[conf_col]) if conf_col and pd.notna(row.get(conf_col)) else None
-            conf_pct = int(conf_val * 100) if conf_val else 0
-
+            em_r   = str(row.get("_pred_em", dominant))
+            es     = EMOTION_STYLE.get(em_r, {"color":"#64748b","emoji":"🎵"})
+            c_val  = float(row[conf_col]) if conf_col in pl_df.columns and pd.notna(row.get(conf_col)) else 0.0
+            c_pct  = int(c_val * 100)
+            e_v    = float(row.get("Energy",      0))
+            d_v    = float(row.get("Danceability", 0))
+            p_v    = float(row.get("Positiveness", 0))
+            t_v    = float(row.get("Tempo",       120))
             st.markdown(
                 f'<div class="track-row">'
                 f'<span class="track-num">{idx}</span>'
                 f'<div class="track-info">'
-                f'<div class="track-name">{row.get("song","—")}</div>'
-                f'<div class="track-artist">{row.get("Artist(s)","—")}</div>'
+                f'<div class="track-name">Track {idx:02d} &nbsp;·&nbsp; '
+                f'⚡{e_v:.2f} 💃{d_v:.2f} 😊{p_v:.2f} 🥁{t_v:.0f}BPM</div>'
+                f'<div class="track-artist">AI-generated audio profile · {c_pct}% confidence</div>'
                 f'</div>'
-                f'<span class="track-badge" '
-                f'style="background:{em_style["color"]}22;color:{em_style["color"]};">'
-                f'{em_style["emoji"]} {str(song_em).title()}</span>'
-                f'<div class="conf-bar-wrap" title="Model confidence: {conf_pct}%">'
-                f'<div class="conf-bar-bg">'
-                f'<div class="conf-bar-fg" '
-                f'style="width:{conf_pct}%;background:{em_style["color"]};"></div>'
+                f'<span class="badge" style="background:{es["color"]}22;color:{es["color"]};">'
+                f'{es["emoji"]} {em_r.title()}</span>'
+                f'<div class="conf-wrap"><div class="conf-bg">'
+                f'<div class="conf-fg" style="width:{c_pct}%;background:{es["color"]};"></div>'
                 f'</div></div>'
-                f'</div>',
-                unsafe_allow_html=True,
+                f'</div>', unsafe_allow_html=True,
             )
 
         st.markdown("<br>", unsafe_allow_html=True)
-        export_cols = [c for c in ["song", "Artist(s)", "_pred_em", "Energy",
-                                    "Positiveness", "Danceability", "_audio_dist"]
+        export_cols = [c for c in ["Energy","Danceability","Positiveness","Speechiness",
+                                    "Acousticness","Tempo","Loudness","_pred_em","_confidence"]
                        if c in pl_df.columns]
         st.download_button(
-            f"📥 Export Playlist CSV ({len(pl_df)} songs)",
+            f"📥 Export Audio Profiles CSV ({len(pl_df)} tracks)",
             pl_df[export_cols].rename(columns={
-                "_pred_em": "ML Predicted Emotion",
-                "_audio_dist": "Audio Distance to Target",
+                "_pred_em":"Predicted Emotion","_confidence":"Model Confidence",
             }).to_csv(index=False).encode(),
             "moodsense_playlist.csv", "text/csv",
             use_container_width=True,
         )
 
     elif st.session_state.get("pl_result") and res["df"].empty:
-        st.warning("No songs matched. Try a different prompt or check that models are loaded.")
+        st.warning("No candidates matched. Try a different prompt or check models are loaded.")
     else:
         st.markdown("""
         <div style="text-align:center;padding:3rem;color:#64748b;">
             <div style="font-size:4rem;margin-bottom:1rem;">🎶</div>
-            <p style="font-size:1.1rem;font-weight:600;">
-                Pick a preset vibe on the left or type your own mood above.
-            </p>
+            <p style="font-size:1.1rem;font-weight:600;">Pick a preset or type your own mood above.</p>
             <p style="font-size:.9rem;">
-                The ML model classifies songs from the dataset and curates
-                a playlist ranked by audio similarity to your emotional signal.
+                The ML model generates synthetic audio profiles matching your emotional signal.
             </p>
         </div>
         """, unsafe_allow_html=True)
