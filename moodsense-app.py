@@ -129,7 +129,7 @@ SELECT
     SAFE_CAST(Instrumentalness AS FLOAT64)                              AS Instrumentalness,
     SAFE_CAST(Tempo            AS FLOAT64)                              AS Tempo,
     SAFE_CAST(
-        REGEXP_REPLACE(CAST(Loudness AS STRING), r'[^0-9.\\-]', '')
+        REGEXP_REPLACE(CAST(loudness__dbAS STRING), r'[^0-9.\\-]', '')
     AS FLOAT64)                                                         AS Loudness,
     SAFE_CAST(Popularity       AS FLOAT64)                              AS Popularity,
     CASE
