@@ -338,35 +338,15 @@ h1, h2, h3 { font-family: 'Syne', sans-serif !important; }
 # BIGQUERY AUTH
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_bq_credentials():
-    """
-    Returns GCP credentials. Priority:
-      1. st.secrets["gcp_service_account"]  — Streamlit Cloud / secrets.toml
-      2. Application Default Credentials    — env var or gcloud auth
-    """
-    try:
-        from google.oauth2 import service_account
-        if "gcp_service_account" in st.secrets:
-            return service_account.Credentials.from_service_account_info(
-                dict(st.secrets["gcp_service_account"]),
-                scopes=["https://www.googleapis.com/auth/bigquery.readonly"],
-            )
-    except Exception:
-        pass
+    from google.oauth2 import service_account
 
-    try:
-        import google.auth
-        creds, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/bigquery.readonly"]
-        )
-        return creds
-    except Exception as exc:
-        raise RuntimeError(
-            "No GCP credentials found.\n\n"
-            "• Streamlit Cloud: add [gcp_service_account] to .streamlit/secrets.toml\n"
-            "• Local: set GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json\n"
-            "• Local: run  gcloud auth application-default login\n\n"
-            f"Original error: {exc}"
-        )
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError("Missing Streamlit secrets: gcp_service_account")
+
+    return service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
