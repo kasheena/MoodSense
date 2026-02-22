@@ -118,41 +118,47 @@ BQ_TABLE_ID = "probable-scout-477715-k7.Moodsense.spotify_dataset_withemotion"
 BQ_QUERY = """
 SELECT
     song,
-    `artist_s`                                                         AS artist,
-    text                                                                AS lyrics,
-    SAFE_CAST(Energy           AS FLOAT64)                              AS Energy,
-    SAFE_CAST(Danceability     AS FLOAT64)                              AS Danceability,
-    SAFE_CAST(Positiveness     AS FLOAT64)                              AS Positiveness,
-    SAFE_CAST(Speechiness      AS FLOAT64)                              AS Speechiness,
-    SAFE_CAST(Liveness         AS FLOAT64)                              AS Liveness,
-    SAFE_CAST(Acousticness     AS FLOAT64)                              AS Acousticness,
-    SAFE_CAST(Instrumentalness AS FLOAT64)                              AS Instrumentalness,
-    SAFE_CAST(Tempo            AS FLOAT64)                              AS Tempo,
+    artist_s AS artist,
+    text AS lyrics,
+
+    SAFE_CAST(energy           AS FLOAT64) AS Energy,
+    SAFE_CAST(danceability     AS FLOAT64) AS Danceability,
+    SAFE_CAST(positiveness     AS FLOAT64) AS Positiveness,
+    SAFE_CAST(speechiness      AS FLOAT64) AS Speechiness,
+    SAFE_CAST(liveness         AS FLOAT64) AS Liveness,
+    SAFE_CAST(acousticness     AS FLOAT64) AS Acousticness,
+    SAFE_CAST(instrumentalness AS FLOAT64) AS Instrumentalness,
+    SAFE_CAST(tempo            AS FLOAT64) AS Tempo,
+
     SAFE_CAST(
-        REGEXP_REPLACE(CAST(loudness__db AS STRING), r'[^0-9.\\-]', '')
-    AS FLOAT64)                                                         AS Loudness,
-    SAFE_CAST(Popularity       AS FLOAT64)                              AS Popularity,
+        REGEXP_REPLACE(CAST(loudness__db AS STRING), r'[^0-9.\-]', '')
+    AS FLOAT64) AS Loudness,
+
+    SAFE_CAST(popularity AS FLOAT64) AS Popularity,
+
     CASE
-        WHEN LOWER(emotion) IN ('joy',     'surprise') THEN 'happy'
-        WHEN LOWER(emotion) IN ('sadness', 'fear')     THEN 'sad'
-        WHEN LOWER(emotion) IN ('anger',   'angry')    THEN 'anger'
-        WHEN emotion         IN ('love',   'Love')     THEN 'love'
+        WHEN LOWER(emotion) IN ('joy','surprise') THEN 'happy'
+        WHEN LOWER(emotion) IN ('sadness','fear') THEN 'sad'
+        WHEN LOWER(emotion) IN ('anger','angry') THEN 'anger'
+        WHEN LOWER(emotion) IN ('love') THEN 'love'
         ELSE NULL
-    END                                                                 AS emotion_4
+    END AS emotion_4
+
 FROM (
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY song, `artist_s`
-            ORDER BY LENGTH(IFNULL(text, '')) DESC
+            PARTITION BY song, artist_s
+            ORDER BY LENGTH(IFNULL(text,'')) DESC
         ) AS _rn
-    FROM `{table}`
+    FROM `probable-scout-477715-k7.Moodsense.spotify_dataset_withemotion`
     WHERE emotion IS NOT NULL
-      AND text    IS NOT NULL
-      AND LENGTH(IFNULL(text, '')) > 50
+      AND text IS NOT NULL
+      AND LENGTH(IFNULL(text,'')) > 50
 )
+
 WHERE _rn = 1
-  AND emotion IN ('joy','surprise','sadness','fear','anger','angry','love','Love')
+  AND LOWER(emotion) IN ('joy','surprise','sadness','fear','anger','angry','love')
 LIMIT 550000
 """.format(table=BQ_TABLE_ID)
 
