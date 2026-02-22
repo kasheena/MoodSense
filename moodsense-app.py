@@ -159,7 +159,7 @@ FROM (
 
 WHERE _rn = 1
   AND LOWER(emotion) IN ('joy','surprise','sadness','fear','anger','angry','love')
-LIMIT 550000
+LIMIT 20000
 """.format(table=BQ_TABLE_ID)
 
 
