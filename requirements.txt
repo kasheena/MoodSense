@@ -25,15 +25,15 @@ vaderSentiment>=3.3.2
 # ── Data ─────────────────────────────────────────────────────────────────────
 pandas>=2.2.2,<3.0
 
+# ── Google BigQuery (dataset source) ─────────────────────────────────────────
+google-cloud-bigquery>=3.17.2
+google-cloud-bigquery-storage>=2.24.0
+google-auth>=2.28.0
+db-dtypes>=1.2.0
+pyarrow>=14.0.1
+
 # ── Streamlit app ────────────────────────────────────────────────────────────
 streamlit>=1.41.1
 
 # ── Visualisation ────────────────────────────────────────────────────────────
 plotly>=5.24.1
-
-# ── BIGQUERY ────────────────────────────────────────────────────────────
-google-cloud-bigquery>=3.17.2        # BQ client
-google-cloud-bigquery-storage>=2.24.0 # faster Arrow-based downloads
-google-auth>=2.28.0                  # credentials
-db-dtypes>=1.2.0                     # BQ → pandas type conversion (required)
-pyarrow>=14.0.1                      # Arrow columnar format BQ uses
