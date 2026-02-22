@@ -114,7 +114,7 @@ BQ_PROJECT  = "probable-scout-477715-k7"
 BQ_TABLE_ID = "probable-scout-477715-k7.Moodsense.spotify_dataset_withemotion"
 
 # Emotion mapping + dedup done server-side in BigQuery to minimise data transfer.
-# ROW_NUMBER deduplicates on (song, Artist(s)), preferring the row with most lyrics.
+# ROW_NUMBER deduplicates on (song, artist_s), preferring the row with most lyrics.
 BQ_QUERY = """
 SELECT
     song,
